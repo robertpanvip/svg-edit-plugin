@@ -1,0 +1,22 @@
+# Build outputs
+.gradle/
+build/
+out/
+!gradle/wrapper/
+
+# Native build artifacts
+native/*/target/
+*.dll
+*.so
+*.dylib
+
+# Local tooling (Gradle distribution downloaded for local runs)
+.tooling/
+
+# IDE
+.idea/
+*.iml
+
+# Local project memory / tooling state (not part of the source)
+.workbuddy/
+*.bak

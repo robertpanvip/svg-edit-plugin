@@ -1,0 +1,13 @@
+<idea-plugin>
+    <id>com.example.svgeditor</id>
+    <name>SVG Editor</name>
+    <vendor email="dev@example.com" url="https://example.com">example</vendor>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="SVG Editor"
+                    anchor="right"
+                    factoryClass="com.example.svgeditor.plugin.SvgEditorToolWindowFactory"/>
+    </extensions>
+</idea-plugin>

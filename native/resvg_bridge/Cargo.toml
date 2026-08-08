@@ -1,0 +1,14 @@
+[package]
+name = "resvg_bridge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "resvg_bridge"
+# cdylib => loadable by JNA from Kotlin. rlib => lets `cargo test` exercise the logic.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Pinned exactly so resvg <-> usvg stay ABI/API compatible.
+resvg = "=0.43.0"
+usvg   = "=0.43.0"

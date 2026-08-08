@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="0 0 200 120">
+  <rect id="bg" x="0" y="0" width="200" height="120" fill="#fafafa"/>
+  <rect id="box-a" x="10" y="10" width="80" height="60" fill="#4caf50"/>
+  <circle id="dot" cx="150" cy="60" r="30" fill="#e91e63"/>
+  <g id="grp" transform="translate(120,80)">
+    <rect id="inner" x="0" y="0" width="40" height="20" fill="#2196f3"/>
+  </g>
+</svg>
