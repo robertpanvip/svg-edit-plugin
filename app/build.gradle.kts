@@ -10,6 +10,9 @@ repositories {
 dependencies {
     // The editor core (renderer interface, panel, engine, collision detection).
     implementation(project(":core"))
+    // FlatLaf: the same Look & Feel IntelliJ IDEA ships with (FlatIntelliJLaf = IntelliJ Light,
+    // FlatDarculaLaf = Darcula). Makes the standalone app look IDEA-consistent.
+    implementation("com.formdev:flatlaf:3.7.2")
 }
 
 kotlin {

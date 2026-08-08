@@ -72,7 +72,8 @@ class SvgEditorPanel(
 
     init {
         setLayout(java.awt.BorderLayout())
-        canvas.background = Color(0x2B, 0x2B, 0x2B)
+        // No hard-coded background: FlatLaf drives canvas.background so the editor follows the
+        // active theme (IntelliJ Light = near-white, Darcula = dark grey).
         canvas.preferredSize = Dimension(640, 420)
         canvas.addComponentListener(
             object : ComponentAdapter() {
@@ -432,7 +433,11 @@ class SvgEditorPanel(
             g.drawRect(rx, ry, rw, rh)
         }
 
-        g.color = Color.WHITE
+        // Crosshair uses a theme-aware contrast colour so it stays visible in both
+        // IntelliJ Light and Darcula.
+        val bg = canvas.background
+        val lum = 0.299 * bg.red + 0.587 * bg.green + 0.114 * bg.blue
+        g.color = if (lum > 140) Color(0x33, 0x33, 0x33) else Color.WHITE
         g.drawLine(pointer.x - 8, pointer.y, pointer.x + 8, pointer.y)
         g.drawLine(pointer.x, pointer.y - 8, pointer.x, pointer.y + 8)
     }

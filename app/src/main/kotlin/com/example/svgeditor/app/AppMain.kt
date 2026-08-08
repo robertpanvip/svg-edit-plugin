@@ -6,6 +6,9 @@ import com.example.svgeditor.core.Samples
 import com.example.svgeditor.core.SvgEditorEngine
 import com.example.svgeditor.core.SvgEditorPanel
 import com.example.svgeditor.core.SvgRenderer
+import com.formdev.flatlaf.FlatDarculaLaf
+import com.formdev.flatlaf.FlatIntelliJLaf
+import com.formdev.flatlaf.FlatLaf
 import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.Font
@@ -15,6 +18,7 @@ import java.awt.dnd.DropTarget
 import java.awt.dnd.DropTargetAdapter
 import java.awt.dnd.DropTargetDropEvent
 import java.io.File
+import javax.swing.BorderFactory
 import javax.swing.JButton
 import javax.swing.JFileChooser
 import javax.swing.JFrame
@@ -47,7 +51,12 @@ fun main(args: Array<String>) {
         System.exit(code)
         return
     }
-    SwingUtilities.invokeLater { launchGui() }
+    SwingUtilities.invokeLater {
+        // Use the same Look & Feel IntelliJ IDEA ships with, so the standalone app feels
+        // IDEA-consistent out of the box (IntelliJ Light). The Theme button switches to Darcula.
+        FlatIntelliJLaf.setup()
+        launchGui()
+    }
 }
 
 /**
@@ -132,7 +141,7 @@ private fun launchGui() {
     val panel = SvgEditorPanel(renderer)
     val sourceArea =
         JTextArea(Samples.SIMPLE, 24, 60).apply {
-            font = Font(Font.MONOSPACED, Font.PLAIN, 12)
+            font = Font(Font.MONOSPACED, Font.PLAIN, 13)
         }
 
     val frame =
@@ -142,6 +151,8 @@ private fun launchGui() {
         }
 
     val toolbar = JToolBar()
+    toolbar.setFloatable(false)
+    toolbar.setRollover(true)
     toolbar.add(JButton("Open…").apply { addActionListener { openFile(frame, sourceArea, panel) } })
     toolbar.add(JButton("Save…").apply { addActionListener { saveFile(frame, sourceArea) } })
     toolbar.add(JButton("Apply source").apply { addActionListener { applySource(sourceArea, panel) } })
@@ -158,6 +169,17 @@ private fun launchGui() {
     toolbar.add(JButton("Zoom -").apply { addActionListener { panel.zoomOut() } })
     toolbar.add(JButton("Fit").apply { addActionListener { panel.fitView() } })
 
+    // Light / Darcula theme toggle (the same LaFs IntelliJ IDEA provides).
+    val themeBtn = JButton("Theme: Light")
+    var isDark = false
+    themeBtn.addActionListener {
+        isDark = !isDark
+        if (isDark) FlatDarculaLaf.setup() else FlatIntelliJLaf.setup()
+        FlatLaf.updateUI()
+        themeBtn.text = if (isDark) "Theme: Dark" else "Theme: Light"
+    }
+    toolbar.add(themeBtn)
+
     // Initial render from the source editor.
     panel.loadSvg(sourceArea.text)
 
@@ -166,7 +188,10 @@ private fun launchGui() {
             dividerLocation = 440
         }
 
-    val statusBar = JLabel("Zoom: 100% · No selection")
+    val statusBar =
+        JLabel("Zoom: 100% · No selection").apply {
+            border = BorderFactory.createEmptyBorder(4, 10, 4, 10)
+        }
     panel.onStatus = { statusBar.text = it }
 
     frame.contentPane.add(toolbar, BorderLayout.NORTH)
