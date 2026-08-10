@@ -3,13 +3,14 @@ package com.example.svgeditor.core
 /**
  * Mouse-interaction state machine for the editor panel.
  *
- * Interaction model (a conventional vector editor):
- *  - Hover: pointer over an element highlights it.
- *  - Select (single or double click): an element becomes "selected" and shows 8 control
- *    points (handles) around its bounding box. Double-click also selects (enters edit mode).
+ * Interaction model (a conventional vector editor, Leafier-style):
+ *  - Hover: pointer over an element highlights it (thin accent outline).
+ *  - Select (single or double click): an element becomes "selected" and shows an edit box
+ *    with 8 control points plus a rotate handle above it.
  *  - Drag the body of a selected element: move it.
- *  - Drag a control point (handle): resize it, anchored on the opposite corner.
+ *  - Drag a control point: resize it, anchored on the opposite corner.
  *  - Click empty space: deselect.
+ *  - While dragging, edges/centres snap to other elements and guide lines are reported.
  *
  * The controller is pure (no Swing/IntelliJ dependency) so it is unit-testable on a plain JVM.
  * All coordinates are SVG/canvas units (the panel converts pointer pixels to these before
@@ -27,6 +28,9 @@ class InteractionController {
         val w: Double,
         val h: Double,
     )
+
+    /** A snap guideline at SVG-unit coordinate `pos` (vertical = an x line, else a y line). */
+    data class SnapLine(val vertical: Boolean, val pos: Double)
 
     sealed class EditResult {
         data class Move(
@@ -58,6 +62,8 @@ class InteractionController {
         internal set
     var previewBox: Box? = null
         internal set
+    var snapLines: List<SnapLine> = emptyList()
+        internal set
     var editMode: EditMode = EditMode.NONE
         private set
 
@@ -67,6 +73,7 @@ class InteractionController {
     private var resizeHandle: Handle? = null
 
     private val handles: List<Handle> = Handle.entries.toList()
+    private val snapThreshold = 5.0 // svg units
 
     /** Pointer moved with no button pressed: refresh hover (+ which handle is under it). */
     fun onHoverMove(
@@ -89,6 +96,7 @@ class InteractionController {
         x: Double,
         y: Double,
     ): Boolean {
+        snapLines = emptyList()
         val hit = CollisionDetector.hitTest(layout, x, y)
         return if (hit != null) {
             selected = hit
@@ -119,6 +127,7 @@ class InteractionController {
     ): Boolean {
         pointerX = x
         pointerY = y
+        snapLines = emptyList()
         if (selected != null) {
             val h = handleAt(selected!!, x, y, tol)
             if (h != null) {
@@ -157,7 +166,7 @@ class InteractionController {
         }
     }
 
-    /** Pointer moved with the button pressed: update the drag delta / preview box. */
+    /** Pointer moved with the button pressed: update drag delta / preview box (+ snap). */
     fun onDragMove(
         _layout: SvgLayout,
         x: Double,
@@ -169,22 +178,26 @@ class InteractionController {
         val sb = startBox ?: return null
         val dx = x - dragStartX
         val dy = y - dragStartY
+        val raw =
+            when (editMode) {
+                EditMode.MOVE -> Box(sb.x + dx, sb.y + dy, sb.w, sb.h)
+                EditMode.RESIZE -> computeResize(sb, resizeHandle!!, dx, dy)
+                EditMode.NONE -> return null
+            }
+        val sel = selected ?: return null
+        val (snapped, lines) = applySnap(_layout, sel, raw)
+        previewBox = snapped
+        snapLines = lines
         return when (editMode) {
-            EditMode.MOVE -> {
-                previewBox = Box(sb.x + dx, sb.y + dy, sb.w, sb.h)
-                EditResult.Move(selected!!, dx, dy)
-            }
-            EditMode.RESIZE -> {
-                val b = computeResize(sb, resizeHandle!!, dx, dy)
-                previewBox = b
-                EditResult.Resize(selected!!, b.x, b.y, b.w, b.h)
-            }
+            EditMode.MOVE -> EditResult.Move(sel, snapped.x - sb.x, snapped.y - sb.y)
+            EditMode.RESIZE -> EditResult.Resize(sel, snapped.x, snapped.y, snapped.w, snapped.h)
             EditMode.NONE -> null
         }
     }
 
     /** Button released: return the committed edit (or null). */
     fun onMouseReleased(): EditResult? {
+        snapLines = emptyList()
         if (state == State.DRAG && selected != null && previewBox != null) {
             val res =
                 when (editMode) {
@@ -307,5 +320,51 @@ class InteractionController {
             ht = min
         }
         return Box(x, y, w, ht)
+    }
+
+    /**
+     * Snap the box's left/centre/right edges and top/middle/bottom edges to the corresponding
+     * edges of other elements (within [snapThreshold] svg units). Returns the corrected box
+     * plus the guide lines to draw.
+     */
+    private fun applySnap(
+        layout: SvgLayout,
+        el: SvgElement,
+        box: Box,
+    ): Pair<Box, List<SnapLine>> {
+        val others = layout.elements.filter { it.id != el.id && it.id.isNotBlank() }
+        if (others.isEmpty()) return box to emptyList()
+
+        val selX = doubleArrayOf(box.x, box.x + box.w / 2, box.x + box.w)
+        val selY = doubleArrayOf(box.y, box.y + box.h / 2, box.y + box.h)
+        var bestX = snapThreshold
+        var bestY = snapThreshold
+        var lineX: Double? = null
+        var lineY: Double? = null
+        for (o in others) {
+            val ox = doubleArrayOf(o.x, o.x + o.width / 2, o.x + o.width)
+            val oy = doubleArrayOf(o.y, o.y + o.height / 2, o.y + o.height)
+            for (tx in ox) for (sx in selX) {
+                val d = tx - sx
+                if (kotlin.math.abs(d) < kotlin.math.abs(bestX)) {
+                    bestX = d
+                    lineX = tx
+                }
+            }
+            for (ty in oy) for (sy in selY) {
+                val d = ty - sy
+                if (kotlin.math.abs(d) < kotlin.math.abs(bestY)) {
+                    bestY = d
+                    lineY = ty
+                }
+            }
+        }
+        val dx = if (lineX != null) bestX else 0.0
+        val dy = if (lineY != null) bestY else 0.0
+        val newBox = Box(box.x + dx, box.y + dy, box.w, box.h)
+        val lines = mutableListOf<SnapLine>()
+        if (lineX != null) lines.add(SnapLine(true, lineX))
+        if (lineY != null) lines.add(SnapLine(false, lineY))
+        return newBox to lines
     }
 }

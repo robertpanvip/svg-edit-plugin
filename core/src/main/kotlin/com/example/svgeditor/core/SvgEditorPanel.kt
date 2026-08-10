@@ -32,9 +32,16 @@ import javax.swing.JToolBar
  *  2. The same render produces an [SvgLayout] (per-element absolute bounding boxes).
  *  3. A [MouseMotionListener] tracks the pointer; we convert pointer pixels to SVG/canvas
  *     coordinates and run [CollisionDetector] to find the element under the cursor.
- *  4. Interaction: click / double-click selects an element and shows 8 control points;
- *     dragging the body moves it, dragging a handle resizes it. The engine rewrites the
- *     element's `transform` in the source SVG and re-renders, so the canvas updates.
+ *  4. Interaction: click / double-click selects an element and shows a Leafier-style edit box
+ *     (thin accent outline, 8 control points, a rotate handle above). Dragging the body moves
+ *     it, dragging a handle resizes it.
+ *
+ * Smooth dragging: when an element is selected we build TWO cached rasters — a background
+ * layer (everything except the selected element) and a foreground layer (only the selected
+ * element). During a drag we blit the static background and offset/scale the foreground with a
+ * plain drawImage — zero resvg calls — so the element follows the cursor at 60fps instead of
+ * only a yellow preview box moving. The edit is committed (and the whole SVG re-rasterized)
+ * once on release.
  *
  * The class depends only on Swing + [SvgRenderer], so it is fully unit-testable with a fake
  * renderer (no IntelliJ SDK, no Rust toolchain required).
@@ -47,6 +54,11 @@ class SvgEditorPanel(
 
     /** Off-screen canvas: the resvg render, composited onto the visible panel. */
     private var offscreen: BufferedImage? = null
+
+    /** Drag layers (only populated while an element is selected). */
+    private var bgImage: BufferedImage? = null
+    private var fgImage: BufferedImage? = null
+    private var layerId: String? = null
 
     private var viewScale = 1.0
     private var offsetX = 0.0
@@ -62,6 +74,14 @@ class SvgEditorPanel(
     /** Status callback (zoom % + selection) for the host application. */
     var onStatus: ((String) -> Unit)? = null
 
+    companion object {
+        private val ACCENT = Color(0x32, 0xCD, 0x79) // Leafier green
+        private val ROTATE_OFFSET = 22 // px above the box top
+        private val ROTATE_R = 5 // rotate handle radius
+        private val HANDLE = 8 // control point size
+        private val GRID_STEP = 24 // px
+    }
+
     private val canvas =
         object : JPanel() {
             override fun paintComponent(g: Graphics) {
@@ -72,8 +92,8 @@ class SvgEditorPanel(
 
     init {
         setLayout(java.awt.BorderLayout())
-        // No hard-coded background: FlatLaf drives canvas.background so the editor follows the
-        // active theme (IntelliJ Light = near-white, Darcula = dark grey).
+        // No hard-coded background: FlatLaf drives the canvas background so the editor follows
+        // the active theme (IntelliJ Light = near-white, Darcula = dark grey).
         canvas.preferredSize = Dimension(640, 420)
         canvas.addComponentListener(
             object : ComponentAdapter() {
@@ -123,6 +143,7 @@ class SvgEditorPanel(
         interaction.selected = null
         interaction.previewBox = null
         interaction.selectedHandle = null
+        clearLayers()
         recomputeView()
         renderAtDeviceSize()
         canvas.repaint()
@@ -180,8 +201,6 @@ class SvgEditorPanel(
         val w = engine.layout.width
         val h = engine.layout.height
         if (w <= 0 || h <= 0) return
-        // Until the canvas is laid out (e.g. headless tests) keep identity mapping so panel
-        // pixels equal SVG coordinates; the real size is picked up on the first resize event.
         val cw = canvas.width.takeIf { it > 0 } ?: return
         val ch = canvas.height.takeIf { it > 0 } ?: return
         val fit = ((cw - 2 * pad) / w).coerceAtMost((ch - 2 * pad) / h).coerceAtLeast(0.01)
@@ -289,6 +308,24 @@ class SvgEditorPanel(
         )
     }
 
+    private fun rebuildLayers() {
+        if (selectedId != null) {
+            engine.selectForEditing(selectedId!!)
+            bgImage = decode(engine.bgPng)
+            fgImage = decode(engine.fgPng)
+            layerId = selectedId
+        } else {
+            clearLayers()
+        }
+    }
+
+    private fun clearLayers() {
+        engine.clearLayers()
+        bgImage = null
+        fgImage = null
+        layerId = null
+    }
+
     // --- event handlers (also exercised directly by tests via debug* hooks) -------
 
     private fun handleHover(
@@ -335,7 +372,11 @@ class SvgEditorPanel(
         val (ix, iy) = toImage(x, y)
         val tol = 6.0 / viewScale
         interaction.onMousePressed(engine.layout, ix, iy, tol)
-        selectedId = interaction.selected?.id
+        val newSel = interaction.selected?.id
+        if (newSel != selectedId) {
+            selectedId = newSel
+            rebuildLayers()
+        }
         canvas.repaint()
     }
 
@@ -345,11 +386,13 @@ class SvgEditorPanel(
                 engine.moveElement(res.element.id, res.dx, res.dy)
                 offscreen = decode(engine.png)
                 selectedId = res.element.id
+                rebuildLayers()
             }
             is InteractionController.EditResult.Resize -> {
                 engine.setElementBox(res.element.id, res.x, res.y, res.w, res.h)
                 offscreen = decode(engine.png)
                 selectedId = res.element.id
+                rebuildLayers()
             }
             null -> {}
         }
@@ -364,6 +407,7 @@ class SvgEditorPanel(
         val (ix, iy) = toImage(x, y)
         if (interaction.onDoubleClick(engine.layout, ix, iy)) {
             selectedId = interaction.selected?.id
+            rebuildLayers()
             canvas.repaint()
             emitStatus()
         }
@@ -390,89 +434,164 @@ class SvgEditorPanel(
         onStatus?.invoke("Zoom: ${(zoom * 100).toInt()}% · $sel")
     }
 
+    // ---- rendering --------------------------------------------------------
+
     private fun renderCanvas(g: Graphics2D) {
         g.color = background
         g.fillRect(0, 0, width, height)
 
-        offscreen?.let { img ->
-            val dw = (img.width / dpiScale).toInt().coerceAtLeast(1)
-            val dh = (img.height / dpiScale).toInt().coerceAtLeast(1)
-            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
-            g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
-            g.drawImage(img, offsetX.toInt(), offsetY.toInt(), dw, dh, null)
-        } ?: run {
-            g.color = Color.GRAY
-            g.drawString("No SVG loaded", 16, 24)
+        drawGrid(g)
+
+        val dragging = interaction.state == InteractionController.State.DRAG
+        if (dragging && layerId != null && bgImage != null && fgImage != null) {
+            // Smooth path: static background + offset/scaled foreground, no resvg.
+            drawScaled(g, bgImage!!)
+            drawFg(g)
+        } else {
+            offscreen?.let { drawScaled(g, it) }
         }
 
-        // Hovered element (blue) — unless it is the selected one.
-        hoveredId?.takeIf { it != selectedId }?.let { engine.layout.byId(it) }?.let { drawRect(g, it, Color(0x42, 0xA5, 0xF5), 1.5f) }
+        drawHover(g)
+        drawSelection(g)
+        drawSnap(g)
+        drawCrosshair(g)
+    }
 
-        // Selected element: yellow box + 8 control points.
-        selectedId?.let { engine.layout.byId(it) }?.let { el ->
+    private fun drawScaled(
+        g: Graphics2D,
+        img: BufferedImage,
+    ) {
+        val dw = (img.width / dpiScale).toInt().coerceAtLeast(1)
+        val dh = (img.height / dpiScale).toInt().coerceAtLeast(1)
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
+        g.drawImage(img, offsetX.toInt(), offsetY.toInt(), dw, dh, null)
+    }
+
+    /**
+     * Composite the foreground (selected element) at the preview box, by cropping its region
+     * out of the foreground raster and drawing it at the target box. Works for both move and
+     * resize because [InteractionController.previewBox] already holds the target geometry.
+     */
+    private fun drawFg(g: Graphics2D) {
+        val el = engine.layout.byId(layerId!!) ?: return
+        val preview = interaction.previewBox ?: return
+        val dpr = dpiScale
+        val sxp = (el.x * viewScale * dpr).toInt().coerceAtLeast(0)
+        val syp = (el.y * viewScale * dpr).toInt().coerceAtLeast(0)
+        val swp = (el.width * viewScale * dpr).toInt().coerceAtLeast(1)
+        val shp = (el.height * viewScale * dpr).toInt().coerceAtLeast(1)
+        val txp = offsetX + preview.x * viewScale
+        val typ = offsetY + preview.y * viewScale
+        val twp = preview.w * viewScale
+        val thp = preview.h * viewScale
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+        g.drawImage(
+            fgImage,
+            txp.toInt(),
+            typ.toInt(),
+            twp.toInt(),
+            thp.toInt(),
+            sxp,
+            syp,
+            swp,
+            shp,
+            null,
+        )
+    }
+
+    private fun drawGrid(g: Graphics2D) {
+        val bg = background
+        val lum = 0.299 * bg.red + 0.587 * bg.green + 0.114 * bg.blue
+        g.color = if (lum > 140) Color(0xE2, 0xE2, 0xE8) else Color(0x2C, 0x2C, 0x34)
+        g.stroke = BasicStroke(1f)
+        val startX = offsetX.toInt() % GRID_STEP
+        val startY = offsetY.toInt() % GRID_STEP
+        var x = startX
+        while (x < width) {
+            g.drawLine(x, 0, x, height)
+            x += GRID_STEP
+        }
+        var y = startY
+        while (y < height) {
+            g.drawLine(0, y, width, y)
+            y += GRID_STEP
+        }
+    }
+
+    private fun drawHover(g: Graphics2D) {
+        hoveredId?.takeIf { it != selectedId }?.let { engine.layout.byId(it) }?.let { el ->
             val rx = (offsetX + el.x * viewScale).toInt()
             val ry = (offsetY + el.y * viewScale).toInt()
             val rw = (el.width * viewScale).toInt()
             val rh = (el.height * viewScale).toInt()
-            g.color = Color(0xFF, 0xEB, 0x3B)
+            g.color = Color(ACCENT.red, ACCENT.green, ACCENT.blue, 130)
             g.stroke = BasicStroke(1.5f)
             g.drawRect(rx, ry, rw, rh)
-            drawHandles(g, el)
         }
+    }
 
-        // Live drag preview (translucent) for move/resize.
-        interaction.previewBox?.let { b ->
-            val rx = (offsetX + b.x * viewScale).toInt()
-            val ry = (offsetY + b.y * viewScale).toInt()
-            val rw = (b.w * viewScale).toInt()
-            val rh = (b.h * viewScale).toInt()
-            g.color = Color(0xFF, 0xEB, 0x3B, 120)
-            g.fillRect(rx, ry, rw, rh)
-            g.color = Color(0xFF, 0xEB, 0x3B)
-            g.stroke = BasicStroke(1.0f)
+    private fun drawSelection(g: Graphics2D) {
+        selectedId?.let { engine.layout.byId(it) }?.let { el ->
+            // While dragging, the box tracks the (snapped) preview box so the edit box follows
+            // the element; otherwise it sits on the element's resting geometry.
+            val box = interaction.previewBox
+                ?: InteractionController.Box(el.x, el.y, el.width, el.height)
+            val rx = (offsetX + box.x * viewScale).toInt()
+            val ry = (offsetY + box.y * viewScale).toInt()
+            val rw = (box.w * viewScale).toInt()
+            val rh = (box.h * viewScale).toInt()
+
+            // Selection rectangle.
+            g.color = ACCENT
+            g.stroke = BasicStroke(1.5f)
             g.drawRect(rx, ry, rw, rh)
-        }
 
-        // Crosshair uses a theme-aware contrast colour so it stays visible in both
-        // IntelliJ Light and Darcula.
+            // Rotate handle: a line up from the top-centre to a circular grip.
+            val cx = rx + rw / 2
+            val handleY = ry - ROTATE_OFFSET
+            g.drawLine(cx, ry, cx, handleY)
+            g.color = Color.WHITE
+            g.fillOval(cx - ROTATE_R, handleY - ROTATE_R, ROTATE_R * 2, ROTATE_R * 2)
+            g.color = ACCENT
+            g.stroke = BasicStroke(1.5f)
+            g.drawOval(cx - ROTATE_R, handleY - ROTATE_R, ROTATE_R * 2, ROTATE_R * 2)
+
+            // 8 control points (white fill, accent outline).
+            val s = HANDLE
+            for (h in InteractionController.Handle.entries) {
+                val (hx, hy) = interaction.handlePoint(box, h)
+                val px = (offsetX + hx * viewScale).toInt()
+                val py = (offsetY + hy * viewScale).toInt()
+                g.color = Color.WHITE
+                g.fillRect(px - s / 2, py - s / 2, s, s)
+                g.color = ACCENT
+                g.stroke = BasicStroke(1.5f)
+                g.drawRect(px - s / 2, py - s / 2, s, s)
+            }
+        }
+    }
+
+    private fun drawSnap(g: Graphics2D) {
+        if (interaction.snapLines.isEmpty()) return
+        g.color = Color(0xFF, 0x3B, 0x3B)
+        g.stroke = BasicStroke(1f)
+        for (line in interaction.snapLines) {
+            if (line.vertical) {
+                val x = (offsetX + line.pos * viewScale).toInt()
+                g.drawLine(x, 0, x, height)
+            } else {
+                val y = (offsetY + line.pos * viewScale).toInt()
+                g.drawLine(0, y, width, y)
+            }
+        }
+    }
+
+    private fun drawCrosshair(g: Graphics2D) {
         val bg = canvas.background
         val lum = 0.299 * bg.red + 0.587 * bg.green + 0.114 * bg.blue
         g.color = if (lum > 140) Color(0x33, 0x33, 0x33) else Color.WHITE
         g.drawLine(pointer.x - 8, pointer.y, pointer.x + 8, pointer.y)
         g.drawLine(pointer.x, pointer.y - 8, pointer.x, pointer.y + 8)
-    }
-
-    private fun drawRect(
-        g: Graphics2D,
-        el: SvgElement,
-        color: Color,
-        lw: Float,
-    ) {
-        g.color = color
-        g.stroke = BasicStroke(lw)
-        g.drawRect(
-            (offsetX + el.x * viewScale).toInt(),
-            (offsetY + el.y * viewScale).toInt(),
-            (el.width * viewScale).toInt(),
-            (el.height * viewScale).toInt(),
-        )
-    }
-
-    private fun drawHandles(
-        g: Graphics2D,
-        el: SvgElement,
-    ) {
-        val box = InteractionController.Box(el.x, el.y, el.width, el.height)
-        val s = 7
-        for (h in InteractionController.Handle.entries) {
-            val (hx, hy) = interaction.handlePoint(box, h)
-            val px = (offsetX + hx * viewScale).toInt()
-            val py = (offsetY + hy * viewScale).toInt()
-            val active = interaction.selectedHandle == h
-            g.color = if (active) Color.WHITE else Color(0xFF, 0xEB, 0x3B)
-            g.fillRect(px - s / 2, py - s / 2, s, s)
-            g.color = Color(0x33, 0x33, 0x33)
-            g.drawRect(px - s / 2, py - s / 2, s, s)
-        }
     }
 }

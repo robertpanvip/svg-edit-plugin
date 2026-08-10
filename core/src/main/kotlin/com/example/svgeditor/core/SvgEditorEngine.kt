@@ -77,6 +77,43 @@ class SvgEditorEngine(
         imageHeight = r.height
     }
 
+    // ---- layered rendering (smooth, resvg-free drag preview) -------------------
+    var bgPng: ByteArray = ByteArray(0)
+        private set
+    var fgPng: ByteArray = ByteArray(0)
+        private set
+
+    /**
+     * Build two cached rasters so dragging never re-rasterizes with resvg:
+     *  - `bgPng`: every element EXCEPT [id] (the dragged element is composited separately).
+     *  - `fgPng`: ONLY [id] visible.
+     * During a drag the panel just blits `bgPng` (static) and offsets/scales `fgPng`, giving a
+     * 60fps follow-cursor feel instead of the old "yellow preview box only" jank.
+     */
+    fun selectForEditing(id: String) {
+        if (id.isBlank()) {
+            clearLayers()
+            return
+        }
+        val others = layout.elements.filter { it.id.isNotBlank() && it.id != id }.map { it.id }
+        val w = if (renderW > 0) renderW else imageWidth
+        val h = if (renderH > 0) renderH else imageHeight
+        if (w <= 0 || h <= 0) {
+            clearLayers()
+            return
+        }
+        val bgSvg = SvgUtils.hideElement(svg, id)
+        var fgSvg = svg
+        for (oid in others) fgSvg = SvgUtils.hideElement(fgSvg, oid)
+        bgPng = renderer.render(bgSvg, w, h).png
+        fgPng = renderer.render(fgSvg, w, h).png
+    }
+
+    fun clearLayers() {
+        bgPng = ByteArray(0)
+        fgPng = ByteArray(0)
+    }
+
     private fun captureGeom() {
         geom.clear()
         for (el in layout.elements) {

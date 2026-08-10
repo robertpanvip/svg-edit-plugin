@@ -85,4 +85,35 @@ object SvgUtils {
     /** Format a 2x3 affine matrix `[a,b,c,d,e,f]` as an SVG `matrix(...)` value. */
     fun matrixAttr(m: DoubleArray): String =
         "matrix(${fmt(m[0])}, ${fmt(m[1])}, ${fmt(m[2])}, ${fmt(m[3])}, ${fmt(m[4])}, ${fmt(m[5])})"
+
+    /**
+     * Return a copy of `svg` where the element with the given `id` is hidden via
+     * `display="none"`. Used to render the two drag layers: the background layer hides the
+     * dragged element, the foreground layer hides everything else.
+     */
+    fun hideElement(
+        svg: String,
+        id: String,
+    ): String {
+        val idRegex = Regex("""id\s*=\s*["']${Regex.escape(id)}["']""")
+        val m = idRegex.find(svg) ?: return svg
+        val idStart = m.range.first
+        val tagStart = svg.lastIndexOf('<', idStart)
+        if (tagStart < 0) return svg
+        val tagEnd = svg.indexOf('>', idStart)
+        if (tagEnd < 0) return svg
+
+        val tag = svg.substring(tagStart, tagEnd + 1)
+        val selfClose = tag.trimEnd().endsWith("/>")
+        val dispRegex = Regex("""\sdisplay\s*=\s*["'][^"']*["']""")
+        val newTag =
+            if (dispRegex.containsMatchIn(tag)) {
+                dispRegex.replace(tag) { """ display="none"""" }
+            } else if (selfClose) {
+                tag.substring(0, tag.length - 2) + """ display="none" />"""
+            } else {
+                tag.substring(0, tag.length - 1) + """ display="none">"""
+            }
+        return svg.substring(0, tagStart) + newTag + svg.substring(tagEnd + 1)
+    }
 }
