@@ -89,4 +89,81 @@ class SvgUtilsTest {
         assertTrue(out.contains("""transform="rotate(30, 0, 0)""""), out)
         assertTrue(out.startsWith("<svg") && out.trimEnd().endsWith("</svg>"))
     }
+
+    @Test
+    fun `parseTransformToMatrix parses common transforms`() {
+        assertArrayEquals(
+            doubleArrayOf(1.0, 0.0, 0.0, 1.0, 5.0, 7.0),
+            SvgUtils.parseTransformToMatrix("translate(5,7)"),
+            1e-12,
+        )
+        assertArrayEquals(
+            doubleArrayOf(2.0, 0.0, 0.0, 2.0, 0.0, 0.0),
+            SvgUtils.parseTransformToMatrix("scale(2)"),
+            1e-12,
+        )
+        // rotate(90) about origin: cos90=0, sin90=1 -> [0, 1, -1, 0, 0, 0]
+        assertArrayEquals(
+            doubleArrayOf(0.0, 1.0, -1.0, 0.0, 0.0, 0.0),
+            SvgUtils.parseTransformToMatrix("rotate(90 0 0)"),
+            1e-12,
+        )
+        assertArrayEquals(
+            doubleArrayOf(1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+            SvgUtils.parseTransformToMatrix(""),
+            1e-12,
+        )
+        // chained: translate(5,7) rotate(90) -> apply rotate first, then translate
+        val chained = SvgUtils.parseTransformToMatrix("translate(5,7) rotate(90 0 0)")
+        assertArrayEquals(
+            doubleArrayOf(0.0, 1.0, -1.0, 0.0, 5.0, 7.0),
+            chained,
+            1e-12,
+        )
+    }
+
+    @Test
+    fun `affineInverse inverts a rotation`() {
+        val rot = SvgUtils.parseTransformToMatrix("rotate(90 0 0)")
+        val inv = SvgUtils.affineInverse(rot)
+        assertArrayEquals(
+            doubleArrayOf(0.0, -1.0, 1.0, 0.0, 0.0, 0.0),
+            inv,
+            1e-12,
+        )
+        // inverse of the inverse is the original
+        assertArrayEquals(rot, SvgUtils.affineInverse(inv), 1e-12)
+    }
+
+    /**
+     * The heart of the transform-aware move: prepending `P = E ∘ A⁻¹ ∘ T ∘ A ∘ E⁻¹` must make the
+     * element's absolute transform become `Translate(dx,dy) ∘ A`. We verify `A' ∘ A⁻¹ == T` for a
+     * top-level rotated element (where A == E), proving the committed element lands exactly at the
+     * root-space drag delta (no local-space drift).
+     */
+    @Test
+    fun `move prepend matrix yields a root-space translation for a rotated element`() {
+        val e = SvgUtils.parseTransformToMatrix("rotate(35 50 40)")
+        val a = e.copyOf() // top-level element: absolute == own transform
+        val aInv = SvgUtils.affineInverse(a)
+        val eInv = SvgUtils.affineInverse(e)
+        val dx = 12.0
+        val dy = -7.0
+        val t = doubleArrayOf(1.0, 0.0, 0.0, 1.0, dx, dy)
+        var p = eInv
+        p = SvgUtils.affineMultiply(a, p)
+        p = SvgUtils.affineMultiply(t, p)
+        p = SvgUtils.affineMultiply(aInv, p)
+        p = SvgUtils.affineMultiply(e, p)
+        // New absolute A' = P ∘ E (top-level: G = identity).
+        val aPrime = SvgUtils.affineMultiply(p, e)
+        // Expect A' ∘ A⁻¹ == Translate(dx,dy).
+        val composed = SvgUtils.affineMultiply(aPrime, aInv)
+        assertEquals(1.0, composed[0], 1e-9)
+        assertEquals(1.0, composed[3], 1e-9)
+        assertEquals(0.0, composed[1], 1e-9)
+        assertEquals(0.0, composed[2], 1e-9)
+        assertEquals(dx, composed[4], 1e-6)
+        assertEquals(dy, composed[5], 1e-6)
+    }
 }

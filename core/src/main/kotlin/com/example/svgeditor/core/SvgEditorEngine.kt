@@ -124,14 +124,42 @@ class SvgEditorEngine(
         }
     }
 
-    /** Move an element (by its SVG `id`) by `(dx, dy)` canvas units, then re-render. */
+    /**
+     * Move an element (by its SVG `id`) by `(dx, dy)` **canvas (root) units**, then re-render.
+     *
+     * Prepending a plain `translate(dx, dy)` to the element's own transform moves it in its
+     * *local* space, which an ancestor group then scales/rotates — so the committed position
+     * drifts from the drag preview (computed in root space). That drift is exactly the "the box
+     * jumps on release" symptom for transformed/nested elements.
+     *
+     * The fix: prepend `P = G⁻¹ ∘ Translate(dx,dy) ∘ G`, where `G` is the element's ancestor-group
+     * transform (parsed from the source). Prepending `P` to the element's own transform makes its
+     * absolute transform become `Translate(dx,dy) ∘ G ∘ E`, i.e. the element moves by exactly
+     * `(dx, dy)` in root space — matching the preview — whether or not the element or its groups
+     * carry scale/rotation.
+     */
     fun moveElement(
         id: String,
         dx: Double,
         dy: Double,
     ): Boolean {
         if (dx == 0.0 && dy == 0.0) return false
-        val updated = SvgUtils.applyTranslate(svg, id, dx, dy)
+        if (layout.byId(id) == null) return false
+        val g = SvgUtils.ancestorTransform(svg, id) // ancestor group transform (root space)
+        val gInv = SvgUtils.affineInverse(g)
+        val t = doubleArrayOf(1.0, 0.0, 0.0, 1.0, dx, dy)
+        // P = G⁻¹ ∘ T ∘ G : applied to the element's own transform, this moves it by (dx,dy) in
+        // root/canvas space regardless of any group scale/rotation or the element's own transform.
+        val p = SvgUtils.affineMultiply(gInv, SvgUtils.affineMultiply(t, g))
+        // Emit a plain translate when the move is a pure translation (no group scale/rotation) so
+        // the source stays human-readable and existing translate-based edits keep working.
+        val pStr =
+            if (SvgUtils.isTranslationMatrix(p)) {
+                "translate(${SvgUtils.fmt(p[4])}, ${SvgUtils.fmt(p[5])})"
+            } else {
+                SvgUtils.matrixAttr(p)
+            }
+        val updated = SvgUtils.prependMatrix(svg, id, pStr)
         if (updated == svg) return false
         svg = updated
         reload()

@@ -24,4 +24,20 @@ object Samples {
           {"index":4,"id":"inner","kind":"path","x":120.0,"y":80.0,"width":40.0,"height":20.0,"transform":[1,0,0,1,120,80]}
         ]}
     """
+
+    /**
+     * An SVG whose elements carry non-identity transforms — exercises transform-aware move
+     * editing. `rot` has its own `rotate(35 50 40)`; `scaled` lives inside a `scale(1.5)
+     * translate(10,10)` group. A plain `translate(dx,dy)` prepend would move these in local
+     * space and drift from the root-space drag preview.
+     */
+    const val TRANSFORMED: String = """
+        <svg xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="0 0 200 120">
+          <rect id="bg" x="0" y="0" width="200" height="120" fill="#fafafa"/>
+          <rect id="rot" x="20" y="20" width="60" height="40" fill="#4caf50" transform="rotate(35 50 40)"/>
+          <g id="sgrp" transform="scale(1.5) translate(60,10)">
+            <rect id="scaled" x="0" y="0" width="40" height="20" fill="#2196f3"/>
+          </g>
+        </svg>
+    """
 }

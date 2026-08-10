@@ -49,6 +49,173 @@ object SvgUtils {
         return "%.4f".format(d).trimEnd('0').trimEnd('.')
     }
 
+    /** Column-major 2x3 identity affine `[a,b,c,d,e,f]` = `[[a,c,e],[b,d,f]]`. */
+    val IDENTITY_MATRIX: DoubleArray get() = doubleArrayOf(1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+    /**
+     * Matrix product `m1 ∘ m2` (apply `m2` first, then `m1`). Both are 2x3 affine matrices in
+     * column-major order `[a,b,c,d,e,f]`.
+     */
+    fun affineMultiply(
+        m1: DoubleArray,
+        m2: DoubleArray,
+    ): DoubleArray {
+        val a = m1[0] * m2[0] + m1[2] * m2[1]
+        val b = m1[1] * m2[0] + m1[3] * m2[1]
+        val c = m1[0] * m2[2] + m1[2] * m2[3]
+        val d = m1[1] * m2[2] + m1[3] * m2[3]
+        val e = m1[0] * m2[4] + m1[2] * m2[5] + m1[4]
+        val f = m1[1] * m2[4] + m1[3] * m2[5] + m1[5]
+        return doubleArrayOf(a, b, c, d, e, f)
+    }
+
+    /** Inverse of a 2x3 affine matrix (column-major). Returns identity for a singular matrix. */
+    fun affineInverse(m: DoubleArray): DoubleArray {
+        val a = m[0]
+        val b = m[1]
+        val c = m[2]
+        val d = m[3]
+        val e = m[4]
+        val f = m[5]
+        val det = a * d - b * c
+        if (det == 0.0) return IDENTITY_MATRIX
+        val id = 1.0 / det
+        val m00 = d * id
+        val m01 = -c * id
+        val m10 = -b * id
+        val m11 = a * id
+        val tx = -(m00 * e + m01 * f)
+        val ty = -(m10 * e + m11 * f)
+        return doubleArrayOf(m00, m10, m01, m11, tx, ty)
+    }
+
+    /**
+     * Parse an SVG `transform` attribute string (e.g. `translate(5,7) rotate(30 50 40)`) into a
+     * single 2x3 affine matrix. Supports `translate`, `scale`, `rotate` (with optional centre),
+     * `matrix`, `skewX` and `skewY`. Returns identity for an empty/absent spec.
+     */
+    fun parseTransformToMatrix(spec: String): DoubleArray {
+        val trimmed = spec.trim()
+        if (trimmed.isEmpty()) return IDENTITY_MATRIX
+        var m = IDENTITY_MATRIX
+        val re = Regex("""(\w+)\s*\(([^)]*)\)""")
+        for (mt in re.findAll(trimmed)) {
+            val name = mt.groupValues[1]
+            val nums =
+                mt.groupValues[2]
+                    .split(Regex("""[,\s]+"""))
+                    .filter { it.isNotBlank() }
+                    .mapNotNull { it.toDoubleOrNull() }
+            m = affineMultiply(m, transformMatrix(name, nums))
+        }
+        return m
+    }
+
+    private fun transformMatrix(
+        name: String,
+        nums: List<Double>,
+    ): DoubleArray =
+        when (name) {
+            "translate" ->
+                doubleArrayOf(1.0, 0.0, 0.0, 1.0, nums.getOrElse(0) { 0.0 }, nums.getOrElse(1) { 0.0 })
+            "scale" -> {
+                val sx = nums.getOrElse(0) { 1.0 }
+                val sy = nums.getOrElse(1) { sx }
+                doubleArrayOf(sx, 0.0, 0.0, sy, 0.0, 0.0)
+            }
+            "rotate" -> {
+                val ang = Math.toRadians(nums.getOrElse(0) { 0.0 })
+                val cx = nums.getOrElse(1) { 0.0 }
+                val cy = nums.getOrElse(2) { 0.0 }
+                val ca = kotlin.math.cos(ang)
+                val sa = kotlin.math.sin(ang)
+                val rot = doubleArrayOf(ca, sa, -sa, ca, 0.0, 0.0)
+                val t1 = doubleArrayOf(1.0, 0.0, 0.0, 1.0, cx, cy)
+                val t2 = doubleArrayOf(1.0, 0.0, 0.0, 1.0, -cx, -cy)
+                affineMultiply(t1, affineMultiply(rot, t2))
+            }
+            "matrix" ->
+                doubleArrayOf(
+                    nums.getOrElse(0) { 1.0 },
+                    nums.getOrElse(1) { 0.0 },
+                    nums.getOrElse(2) { 0.0 },
+                    nums.getOrElse(3) { 1.0 },
+                    nums.getOrElse(4) { 0.0 },
+                    nums.getOrElse(5) { 0.0 },
+                )
+            "skewX" -> {
+                val ang = Math.toRadians(nums.getOrElse(0) { 0.0 })
+                doubleArrayOf(1.0, 0.0, kotlin.math.tan(ang), 1.0, 0.0, 0.0)
+            }
+            "skewY" -> {
+                val ang = Math.toRadians(nums.getOrElse(0) { 0.0 })
+                doubleArrayOf(1.0, kotlin.math.tan(ang), 0.0, 1.0, 0.0, 0.0)
+            }
+            else -> IDENTITY_MATRIX
+        }
+
+    /**
+     * Return the `transform` attribute value of the element with the given `id` (empty string if
+     * the element has no transform). Used by move editing to convert a root-canvas drag delta
+     * into the element's local coordinate space.
+     */
+    fun ownTransformOf(
+        svg: String,
+        id: String,
+    ): String {
+        val idRegex = Regex("""id\s*=\s*["']${Regex.escape(id)}["']""")
+        val m = idRegex.find(svg) ?: return ""
+        val idStart = m.range.first
+        val tagStart = svg.lastIndexOf('<', idStart)
+        if (tagStart < 0) return ""
+        val tagEnd = svg.indexOf('>', idStart)
+        if (tagEnd < 0) return ""
+        return transformAttrOfTag(svg.substring(tagStart, tagEnd + 1))
+    }
+
+    /** Extract the `transform` attribute value from a single tag string (empty if absent). */
+    private fun transformAttrOfTag(tag: String): String {
+        val transformRegex = Regex("""transform\s*=\s*["']([^"']*)["']""")
+        return transformRegex.find(tag)?.groupValues?.get(1) ?: ""
+    }
+
+    /**
+     * The cumulative transform of the ANCESTOR groups of `id` (root/canvas space), product of all
+     * enclosing `<g>` transforms (outer-most applied last). Identity when the element is not inside
+     * any group. This is what move editing needs to convert a root-canvas drag delta into the
+     * element's local space — derived purely from the source so it is independent of how `resvg`
+     * reports the element's own (possibly geometry-baked) transform.
+     */
+    fun ancestorTransform(
+        svg: String,
+        id: String,
+    ): DoubleArray {
+        val spans = scanTags(svg)
+        val target = spans.firstOrNull { it.id == id } ?: return IDENTITY_MATRIX
+        val groups = mutableListOf<TagSpan>()
+        var p = target.parentId
+        while (p != null) {
+            val ps = spans.firstOrNull { it.id == p } ?: break
+            if (ps.isGroup) groups.add(ps)
+            p = ps.parentId
+        }
+        // `groups` is collected inner-to-outer (walking up the parent chain). The absolute group
+        // transform applies the outer-most last, so fold as cur ∘ g over [outer … inner].
+        var g = IDENTITY_MATRIX
+        for (grp in groups.asReversed()) {
+            val spec = transformAttrOfTag(svg.substring(grp.openStart, grp.openEnd))
+            g = affineMultiply(g, parseTransformToMatrix(spec))
+        }
+        return g
+    }
+
+    /** True when `m` is a pure translation (no scale/rotation/shear). */
+    fun isTranslationMatrix(m: DoubleArray): Boolean =
+        kotlin.math.abs(m[0] - 1.0) < 1e-9 &&
+            kotlin.math.abs(m[3] - 1.0) < 1e-9 &&
+            kotlin.math.abs(m[1]) < 1e-9 &&
+            kotlin.math.abs(m[2]) < 1e-9
+
     /**
      * Prepend `rotate(a, cx, cy)` to the element's `transform` list (placed BEFORE any existing
      * transform). Because SVG applies transforms right-to-left, a prepended transform is the LAST

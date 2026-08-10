@@ -398,6 +398,41 @@ fun runDragTest(): Int {
         require("rotate(" in srcR) { "no rotate(..) written to source SVG" }
         println("DRAGTEST OK (rotate phase consistent)")
 
+        // ---- Transformed move phase: drag `rot` (own rotate transform) and `scaled` (inside a
+        // scaled group). A plain translate prepend would move these in *local* space and drift on
+        // release; the transform-aware move must keep the committed render pinned to the preview.
+        // This is the exact "the box jumps up on release" report for transformed/nested elements. ----
+        for ((id, color) in listOf("rot" to "green", "scaled" to "blue")) {
+            panel.loadSvg(Samples.TRANSFORMED)
+            val restT = panel.layout.byId(id)!!
+            val c = panel.debugElementCenterPx(id) ?: error("$id center is null (transformed)")
+            panel.debugPressDrag(c.x, c.y, c.x + 60, c.y + 40)
+            val midT = capture("midT_$id")
+            panel.debugRelease()
+            val afterT = capture("afterT_$id")
+            val movedT = panel.layout.byId(id)!!
+            val midC = if (color == "green") greenCentroid(midT) else blueCentroid(midT)
+            val afterC = if (color == "green") greenCentroid(afterT) else blueCentroid(afterT)
+            println("dragtest[transformed $id]: centroid  mid=$midC  after=$afterC")
+            if (midC != null && afterC != null) {
+                val dpx = kotlin.math.abs(midC.first - afterC.first)
+                val dpy = kotlin.math.abs(midC.second - afterC.second)
+                println("dragtest[transformed $id]: mid<->after pixel delta = (${"%.1f".format(dpx)}, ${"%.1f".format(dpy)})")
+                require(dpx < 4 && dpy < 4) { "transformed $id: landed at a different pixel than the preview (delta=($dpx,$dpy))" }
+            }
+            // Committed bbox must equal the resting bbox plus the root-space drag delta.
+            val dxSvg = 60.0 / 2.96
+            val dySvg = 40.0 / 2.96
+            require(kotlin.math.abs((movedT.x - restT.x) - dxSvg) < 2.0) {
+                "transformed $id: x did not move by the root-space drag delta (got ${movedT.x - restT.x}, expected ~$dxSvg)"
+            }
+            require(kotlin.math.abs((movedT.y - restT.y) - dySvg) < 2.0) {
+                "transformed $id: y did not move by the root-space drag delta (got ${movedT.y - restT.y}, expected ~$dySvg)"
+            }
+            println("dragtest[transformed $id]: box (${restT.x},${restT.y}) -> (${movedT.x},${movedT.y})  [~+(${"%.1f".format(dxSvg)},${"%.1f".format(dySvg)})]")
+            println("DRAGTEST OK (transformed $id move consistent)")
+        }
+
         return 0
     } catch (e: Throwable) {
         println("DRAGTEST FAILED: ${e.message}")
