@@ -17,10 +17,8 @@ import java.awt.event.MouseWheelEvent
 import java.awt.event.MouseWheelListener
 import java.awt.image.BufferedImage
 import javax.imageio.ImageIO
-import javax.swing.JButton
 import javax.swing.JPanel
 import javax.swing.JScrollPane
-import javax.swing.JToolBar
 
 /**
  * The SVG editor panel.
@@ -105,33 +103,7 @@ class SvgEditorPanel(
             },
         )
         add(JScrollPane(canvas), java.awt.BorderLayout.CENTER)
-        add(buildToolbar(), java.awt.BorderLayout.NORTH)
         installMouse()
-    }
-
-    private fun buildToolbar(): JToolBar {
-        val bar = JToolBar()
-        bar.add(
-            JButton("Load sample").apply {
-                addActionListener { loadSvg(Samples.SIMPLE) }
-            },
-        )
-        bar.add(
-            JButton("Zoom +").apply {
-                addActionListener { zoomIn() }
-            },
-        )
-        bar.add(
-            JButton("Zoom -").apply {
-                addActionListener { zoomOut() }
-            },
-        )
-        bar.add(
-            JButton("Fit").apply {
-                addActionListener { fitView() }
-            },
-        )
-        return bar
     }
 
     // ---- public API -------------------------------------------------------
@@ -185,7 +157,7 @@ class SvgEditorPanel(
     }
 
     /** Test hook: the inner canvas component (for synthetic event dispatch in tests). */
-    internal fun debugCanvas(): java.awt.Component = canvas
+    fun debugCanvas(): java.awt.Component = canvas
 
     // ---- internals --------------------------------------------------------
 
@@ -229,6 +201,8 @@ class SvgEditorPanel(
         val rh = kotlin.math.max(1, kotlin.math.round(h * viewScale * dpiScale).toInt())
         engine.renderAt(rw, rh)
         offscreen = decode(engine.png)
+        // Keep drag layers crisp after zoom / resize / DPI changes.
+        if (selectedId != null) rebuildLayers()
     }
 
     private fun currentDpi(): Double {
@@ -362,7 +336,13 @@ class SvgEditorPanel(
         pointer.y = y
         val (ix, iy) = toImage(x, y)
         interaction.onDragMove(engine.layout, ix, iy)
-        canvas.repaint()
+        // paintImmediately is synchronous on the EDT, so the preview follows the cursor
+        // without the lag of an asynchronous repaint().
+        if (canvas.isShowing) {
+            canvas.paintImmediately(0, 0, canvas.width, canvas.height)
+        } else {
+            canvas.repaint()
+        }
     }
 
     private fun handlePress(
@@ -373,10 +353,11 @@ class SvgEditorPanel(
         val tol = 6.0 / viewScale
         interaction.onMousePressed(engine.layout, ix, iy, tol)
         val newSel = interaction.selected?.id
-        if (newSel != selectedId) {
-            selectedId = newSel
-            rebuildLayers()
-        }
+        selectedId = newSel
+        // Always re-bake the drag layers on press. The cached layers are resolution-dependent
+        // (viewScale/dpiScale), so they must be refreshed even if the selection id did not change
+        // (e.g. after zooming, or pressing an already-selected element to drag again).
+        if (newSel != null) rebuildLayers() else clearLayers()
         canvas.repaint()
     }
 
@@ -414,19 +395,53 @@ class SvgEditorPanel(
     }
 
     /** Test hook: select an element via double-click. */
-    internal fun debugDoubleClick(
+    fun debugDoubleClick(
         x: Int,
         y: Int,
     ) = handleDoubleClick(x, y)
 
     /** Test hook: drive a full press-drag-release cycle deterministically. */
-    internal fun debugDrag(
+    fun debugDrag(
         p1: Point,
         p2: Point,
     ) {
         handlePress(p1.x, p1.y)
         handleDrag(p2.x, p2.y)
         handleRelease()
+    }
+
+    /** Test hook: panel-pixel center of an element (uses the same view math as rendering). */
+    fun debugElementCenterPx(id: String): Point? {
+        val el = engine.layout.byId(id) ?: return null
+        return Point(
+            (offsetX + (el.x + el.width / 2) * viewScale).toInt(),
+            (offsetY + (el.y + el.height / 2) * viewScale).toInt(),
+        )
+    }
+
+    /** Test hook: run press + drag but NOT release (so callers can capture the mid-drag frame). */
+    fun debugPressDrag(
+        x1: Int,
+        y1: Int,
+        x2: Int,
+        y2: Int,
+    ) {
+        handlePress(x1, y1)
+        handleDrag(x2, y2)
+    }
+
+    /** Test hook: finish a press-drag started with [debugPressDrag]. */
+    fun debugRelease() = handleRelease()
+
+    /** Test hook: render the canvas onto an off-screen image for visual inspection. */
+    fun debugRenderTo(img: BufferedImage) {
+        val g2 = img.createGraphics()
+        g2.color = Color.WHITE
+        g2.fillRect(0, 0, img.width, img.height)
+        g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+        g2.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
+        canvas.paint(g2)
+        g2.dispose()
     }
 
     private fun emitStatus() {
@@ -477,27 +492,22 @@ class SvgEditorPanel(
         val el = engine.layout.byId(layerId!!) ?: return
         val preview = interaction.previewBox ?: return
         val dpr = dpiScale
+        // Source crop in device pixels within the cached foreground raster.
         val sxp = (el.x * viewScale * dpr).toInt().coerceAtLeast(0)
         val syp = (el.y * viewScale * dpr).toInt().coerceAtLeast(0)
         val swp = (el.width * viewScale * dpr).toInt().coerceAtLeast(1)
         val shp = (el.height * viewScale * dpr).toInt().coerceAtLeast(1)
+        // Destination box in panel pixels.
         val txp = offsetX + preview.x * viewScale
         val typ = offsetY + preview.y * viewScale
         val twp = preview.w * viewScale
         val thp = preview.h * viewScale
+        if (sxp + swp > (fgImage?.width ?: 0) || syp + shp > (fgImage?.height ?: 0)) return
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
-        g.drawImage(
-            fgImage,
-            txp.toInt(),
-            typ.toInt(),
-            twp.toInt(),
-            thp.toInt(),
-            sxp,
-            syp,
-            swp,
-            shp,
-            null,
-        )
+        // Use a subimage so we get x,y,width,height semantics instead of the error-prone
+        // drawImage(..., sx1, sy1, sx2, sy2) overload where x2/y2 are coordinates.
+        val crop = fgImage!!.getSubimage(sxp, syp, swp, shp)
+        g.drawImage(crop, txp.toInt(), typ.toInt(), twp.toInt(), thp.toInt(), null)
     }
 
     private fun drawGrid(g: Graphics2D) {

@@ -15,12 +15,18 @@ class InteractionControllerTest {
     }
 
     @Test
-    fun `single click on an element selects it without starting a drag`() {
+    fun `single press on an element selects it and starts a potential drag`() {
         val ctrl = InteractionController()
         val started = ctrl.onMousePressed(layout, 50.0, 40.0)
         assertTrue(started)
         assertEquals("box-a", ctrl.selected?.id)
+        assertEquals(InteractionController.State.DRAG, ctrl.state)
+        assertEquals(InteractionController.EditMode.MOVE, ctrl.editMode)
+        // Releasing without moving leaves the element selected (click-to-select).
+        val res = ctrl.onMouseReleased()
+        assertNull(res)
         assertEquals(InteractionController.State.IDLE, ctrl.state)
+        assertEquals("box-a", ctrl.selected?.id)
     }
 
     @Test

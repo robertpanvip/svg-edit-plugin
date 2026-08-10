@@ -20,3 +20,7 @@ native/*/target/
 # Local project memory / tooling state (not part of the source)
 .workbuddy/
 *.bak
+
+# Headless drag-test artefacts
+dragtest_*.png
+app/dragtest_*.png

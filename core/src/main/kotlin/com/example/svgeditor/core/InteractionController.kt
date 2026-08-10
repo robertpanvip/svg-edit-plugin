@@ -152,10 +152,17 @@ class InteractionController {
         }
         val hit = CollisionDetector.hitTest(layout, x, y)
         return if (hit != null) {
+            // Leafier/Figma-style: pressing on an element immediately starts a MOVE drag.
+            // If the user releases without moving, onMouseReleased sees a null previewBox and
+            // simply leaves the element selected (behaves like a plain click-to-select).
             selected = hit
             selectedHandle = null
-            editMode = EditMode.NONE
-            state = State.IDLE
+            editMode = EditMode.MOVE
+            startBox = boxOf(hit)
+            dragStartX = x
+            dragStartY = y
+            state = State.DRAG
+            previewBox = null
             true
         } else {
             selected = null
