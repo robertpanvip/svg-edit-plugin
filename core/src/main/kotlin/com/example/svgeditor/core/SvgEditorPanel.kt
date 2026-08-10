@@ -433,11 +433,28 @@ class SvgEditorPanel(
     /** Test hook: finish a press-drag started with [debugPressDrag]. */
     fun debugRelease() = handleRelease()
 
-    /** Test hook: render the canvas onto an off-screen image for visual inspection. */
-    fun debugRenderTo(img: BufferedImage) {
+    /** Test hook: force a DPI scale (simulates a HiDPI display in headless tests). */
+    fun debugSetDpi(d: Double) {
+        dpiScale = d
+        renderAtDeviceSize()
+        if (canvas.isShowing) {
+            canvas.paintImmediately(0, 0, canvas.width, canvas.height)
+        } else {
+            canvas.repaint()
+        }
+    }
+
+    /** Test hook: render the canvas onto an off-screen image for visual inspection.
+     *  `scale` simulates a HiDPI device: the canvas is painted through a `scale(scale,scale)`
+     *  transform, exactly like a Retina/HiDPI Graphics2D, into an image sized logical*scale. */
+    fun debugRenderTo(
+        img: BufferedImage,
+        scale: Double = 1.0,
+    ) {
         val g2 = img.createGraphics()
+        g2.scale(scale, scale)
         g2.color = Color.WHITE
-        g2.fillRect(0, 0, img.width, img.height)
+        g2.fillRect(0, 0, (img.width / scale).toInt(), (img.height / scale).toInt())
         g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
         g2.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
         canvas.paint(g2)

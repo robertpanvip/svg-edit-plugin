@@ -179,12 +179,17 @@ fun runDragTest(): Int {
         val imgH = 420
         panel.loadSvg(Samples.SIMPLE)
 
-        fun capture(tag: String) {
-            val img = BufferedImage(imgW, imgH, BufferedImage.TYPE_INT_RGB)
-            panel.debugRenderTo(img)
+        fun capture(
+            tag: String,
+            scale: Double = 1.0,
+        ) {
+            // Render through a `scale(scale,scale)` Graphics2D — exactly what a HiDPI/Retina
+            // display does — so the drag-preview blit is exercised under a real transform.
+            val img = BufferedImage((imgW * scale).toInt(), (imgH * scale).toInt(), BufferedImage.TYPE_INT_RGB)
+            panel.debugRenderTo(img, scale)
             val out = File("dragtest_$tag.png")
             ImageIO.write(img, "png", out)
-            println("dragtest: wrote $out")
+            println("dragtest: wrote $out (scale=$scale)")
         }
 
         val restBox = panel.layout.byId("box-a")!!
@@ -209,17 +214,148 @@ fun runDragTest(): Int {
         println("dragtest: box-a after  = (${afterBox.x}, ${afterBox.y})")
         println("dragtest: box-a transform in source = ${tm?.groupValues?.get(1)}")
 
+        // Pixel-level check: the dragged element (box-a, green) must sit at the SAME pixel
+        // location in the mid-drag frame and the post-release frame. A mismatch here is the
+        // exact "dropped position != final position" bug.
+        val midImg = ImageIO.read(File("dragtest_mid.png"))
+        val afterImg = ImageIO.read(File("dragtest_after.png"))
+        val midC = greenCentroid(midImg)
+        val afterC = greenCentroid(afterImg)
+        println("dragtest: box-a green centroid  mid=$midC  after=$afterC")
+        if (midC != null && afterC != null) {
+            val dpx = kotlin.math.abs(midC.first - afterC.first)
+            val dpy = kotlin.math.abs(midC.second - afterC.second)
+            println("dragtest: mid<->after pixel delta = (${"%.1f".format(dpx)}, ${"%.1f".format(dpy)})")
+            require(dpx < 4 && dpy < 4) { "dragged element landed at a different pixel than the preview (delta=($dpx,$dpy))" }
+        }
+
         require(afterBox.x > restBox.x + 10) { "box-a did not move right enough (x=${afterBox.x})" }
         require(afterBox.y > restBox.y + 8) { "box-a did not move down enough (y=${afterBox.y})" }
         require("translate(" in src) { "no translate(..) written to source SVG" }
 
         println("DRAGTEST OK (moved box-a by ~(${"%.1f".format(afterBox.x - restBox.x)}, ${"%.1f".format(afterBox.y - restBox.y)}) svg units)")
+
+        // ---- HiDPI phase: a real Retina/HiDPI display renders the raster at 2x AND paints
+        // through a scale(2,2) Graphics2D. We force the raster to 2x (debugSetDpi) and render
+        // the frames through a scale=2.0 context so the preview blit is exercised under a real
+        // transform. This is where a getSubimage-on-HiDPI offset would surface as a drop-vs-final gap.
+        panel.loadSvg(Samples.SIMPLE)
+        panel.debugSetDpi(2.0)
+        val center2 = panel.debugElementCenterPx("box-a") ?: error("box-a center is null (dpr=2)")
+        println("dragtest[dpr=2]: box-a center(px) = $center2")
+        panel.debugPressDrag(center2.x, center2.y, center2.x + 80, center2.y + 60)
+        capture("mid2", scale = 2.0)
+        panel.debugRelease()
+        capture("after2", scale = 2.0)
+        // Centroids are in device px here (image is 2x); compare within the same scale.
+        val mid2 = greenCentroid(ImageIO.read(File("dragtest_mid2.png")))
+        val after2 = greenCentroid(ImageIO.read(File("dragtest_after2.png")))
+        println("dragtest[dpr=2]: box-a green centroid  mid=$mid2  after=$after2")
+        if (mid2 != null && after2 != null) {
+            val dpx = kotlin.math.abs(mid2.first - after2.first)
+            val dpy = kotlin.math.abs(mid2.second - after2.second)
+            println("dragtest[dpr=2]: mid<->after pixel delta = (${"%.1f".format(dpx)}, ${"%.1f".format(dpy)})")
+            // Allow up to ~1 logical px (2 device px) of anti-alias jitter.
+            require(dpx < 2.5 && dpy < 2.5) { "dpr=2: dragged element landed at a different pixel than the preview (delta=($dpx,$dpy))" }
+        }
+        println("DRAGTEST OK (dpr=2 phase consistent)")
+
+        // ---- Resize phase: drag the SE handle of box-a and verify the stretched preview
+        // lands exactly where the committed matrix(..) resize renders it. ----
+        panel.loadSvg(Samples.SIMPLE)
+        val rCenter = panel.debugElementCenterPx("box-a")!!
+        panel.debugDoubleClick(rCenter.x, rCenter.y) // select box-a
+        // SE handle sits at the element's bottom-right corner in panel pixels.
+        val seX = (24.0 + (10.0 + 80.0) * 2.96).toInt() // offsetX + (x+w)*viewScale (~290)
+        val seY = (32.4 + (10.0 + 60.0) * 2.96).toInt() // offsetY + (y+h)*viewScale (~240)
+        panel.debugPressDrag(seX, seY, seX + 60, seY + 40)
+        capture("midResize")
+        panel.debugRelease()
+        capture("afterResize")
+        val rMid = greenCentroid(ImageIO.read(File("dragtest_midResize.png")))
+        val rAfter = greenCentroid(ImageIO.read(File("dragtest_afterResize.png")))
+        println("dragtest[resize]: box-a green centroid  mid=$rMid  after=$rAfter")
+        if (rMid != null && rAfter != null) {
+            val dpx = kotlin.math.abs(rMid.first - rAfter.first)
+            val dpy = kotlin.math.abs(rMid.second - rAfter.second)
+            println("dragtest[resize]: mid<->after pixel delta = (${"%.1f".format(dpx)}, ${"%.1f".format(dpy)})")
+            require(dpx < 4 && dpy < 4) { "resize: dragged element landed at a different pixel than the preview (delta=($dpx,$dpy))" }
+        }
+        println("DRAGTEST OK (resize phase consistent)")
+
+        // ---- Nested phase: drag `inner`, which lives inside <g transform="translate(120,80)">.
+        // The preview (absolute SVG space) must match the committed, group-aware translate. ----
+        panel.loadSvg(Samples.SIMPLE)
+        val nCenter = panel.debugElementCenterPx("inner")!!
+        panel.debugPressDrag(nCenter.x, nCenter.y, nCenter.x + 50, nCenter.y + 30)
+        capture("midNested")
+        panel.debugRelease()
+        capture("afterNested")
+        val nMid = blueCentroid(ImageIO.read(File("dragtest_midNested.png")))
+        val nAfter = blueCentroid(ImageIO.read(File("dragtest_afterNested.png")))
+        println("dragtest[nested]: inner blue centroid  mid=$nMid  after=$nAfter")
+        if (nMid != null && nAfter != null) {
+            val dpx = kotlin.math.abs(nMid.first - nAfter.first)
+            val dpy = kotlin.math.abs(nMid.second - nAfter.second)
+            println("dragtest[nested]: mid<->after pixel delta = (${"%.1f".format(dpx)}, ${"%.1f".format(dpy)})")
+            require(dpx < 4 && dpy < 4) { "nested: dragged element landed at a different pixel than the preview (delta=($dpx,$dpy))" }
+        }
+        println("DRAGTEST OK (nested phase consistent)")
+
         return 0
     } catch (e: Throwable) {
         println("DRAGTEST FAILED: ${e.message}")
         e.printStackTrace()
         return 1
     }
+}
+
+/**
+ * Find the centroid (in image pixels) of box-a's green fill (#4caf50). box-a is the only
+ * strongly-green element in the sample, so this isolates it from the background, the pink dot
+ * and the blue inner rect.
+ */
+private fun greenCentroid(img: BufferedImage): Pair<Double, Double>? {
+    var sx = 0L
+    var sy = 0L
+    var n = 0L
+    for (y in 0 until img.height) {
+        for (x in 0 until img.width) {
+            val p = img.getRGB(x, y)
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            if (g > 140 && r < 110 && b < 120 && g > r && g > b) {
+                sx += x
+                sy += y
+                n++
+            }
+        }
+    }
+    if (n == 0L) return null
+    return (sx.toDouble() / n) to (sy.toDouble() / n)
+}
+
+/** Centroid of `inner`'s blue fill (#2196f3), used by the nested-drag phase. */
+private fun blueCentroid(img: BufferedImage): Pair<Double, Double>? {
+    var sx = 0L
+    var sy = 0L
+    var n = 0L
+    for (y in 0 until img.height) {
+        for (x in 0 until img.width) {
+            val p = img.getRGB(x, y)
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            if (b > 200 && r < 100 && g < 200 && b > r && b > g) {
+                sx += x
+                sy += y
+                n++
+            }
+        }
+    }
+    if (n == 0L) return null
+    return (sx.toDouble() / n) to (sy.toDouble() / n)
 }
 
 private fun launchGui() {

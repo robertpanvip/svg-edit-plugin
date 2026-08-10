@@ -116,4 +116,124 @@ object SvgUtils {
             }
         return svg.substring(0, tagStart) + newTag + svg.substring(tagEnd + 1)
     }
+
+    /**
+     * Build a minimal SVG that renders ONLY the element with `id` (and its ancestor `<g>`
+     * groups, so a nested element keeps its correct absolute position). Everything else is
+     * dropped. This is used for the foreground drag layer: unlike [hideElement], it never
+     * hides an ancestor group (which would also hide the element we actually want to show).
+     *
+     * The result keeps the original `<svg>` root attributes (width/height/viewBox) so the
+     * solo element renders at exactly the same coordinates as in the full document.
+     */
+    fun soloElement(
+        svg: String,
+        id: String,
+    ): String {
+        val spans = scanTags(svg)
+        val target = spans.firstOrNull { it.id == id } ?: return svg
+
+        // Outermost-first chain of ancestor groups.
+        val chain = mutableListOf<TagSpan>()
+        var p = target.parentId
+        while (p != null) {
+            val ps = spans.firstOrNull { it.id == p } ?: break
+            chain.add(0, ps)
+            p = ps.parentId
+        }
+
+        val rootOpen = svgRootOpenTag(svg)
+        val sb = StringBuilder()
+        sb.append(rootOpen)
+        for (a in chain) sb.append(svg.substring(a.openStart, a.openEnd))
+        val targetEnd = if (target.closeStart >= 0) target.closeEnd else target.openEnd
+        sb.append(svg.substring(target.openStart, targetEnd))
+        for (a in chain.reversed()) {
+            if (a.closeStart >= 0) sb.append(svg.substring(a.closeStart, a.closeEnd)) else sb.append("</g>")
+        }
+        sb.append("</svg>")
+        return sb.toString()
+    }
+
+    // ---- private tag-scanning helpers (used by soloElement) ----
+
+    private data class TagSpan(
+        var id: String?,
+        var isGroup: Boolean,
+        var openStart: Int,
+        var openEnd: Int,
+        var closeStart: Int,
+        var closeEnd: Int,
+        var parentId: String?,
+    )
+
+    private fun idAttr(tag: String): String? {
+        val m = Regex("""\bid\s*=\s*["']([^"']*)["']""").find(tag)
+        return m?.groupValues?.get(1)
+    }
+
+    private fun isGroupOpen(tag: String): Boolean {
+        val t = tag.trimStart()
+        if (!t.startsWith("<g", ignoreCase = true)) return false
+        val after = t.substring(2)
+        return after.isEmpty() || after[0] == '>' || after[0].isWhitespace()
+    }
+
+    /** Flat list of every tag in `svg`, with parent (enclosing group) ids and open/close spans. */
+    private fun scanTags(svg: String): List<TagSpan> {
+        val spans = mutableListOf<TagSpan>()
+        val openGroups = ArrayDeque<Int>() // span indices of currently-open groups
+        val idStack = ArrayDeque<String>() // ids of currently-open id'd groups
+        val allOpen = ArrayDeque<Boolean>() // open groups (id'd or not) for close-matching
+        var i = 0
+        while (i < svg.length) {
+            val lt = svg.indexOf('<', i)
+            if (lt < 0) break
+            val gt = svg.indexOf('>', lt)
+            if (gt < 0) break
+            val tag = svg.substring(lt, gt + 1)
+            if (tag.startsWith("</")) {
+                if (allOpen.isNotEmpty() && allOpen.removeLast()) {
+                    if (idStack.isNotEmpty()) idStack.removeLast()
+                    if (openGroups.isNotEmpty()) {
+                        val gi = openGroups.removeLast()
+                        spans[gi].closeStart = lt
+                        spans[gi].closeEnd = gt + 1
+                    }
+                }
+                i = gt + 1
+                continue
+            }
+            val selfClosing = tag.endsWith("/>")
+            val isG = isGroupOpen(tag)
+            val tid = idAttr(tag)
+            val parentId =
+                if (isG) {
+                    idStack.run { if (size >= 2) get(size - 2) else null }
+                } else {
+                    idStack.lastOrNull()
+                }
+            val span = TagSpan(tid, isG, lt, gt + 1, -1, -1, parentId)
+            val idx = spans.size
+            spans.add(span)
+            if (isG) {
+                allOpen.addLast(tid != null)
+                if (tid != null) idStack.addLast(tid)
+                openGroups.addLast(idx)
+            }
+            i = gt + 1
+        }
+        return spans
+    }
+
+    private fun svgRootOpenTag(svg: String): String {
+        val lt = svg.indexOf("<svg", ignoreCase = true)
+        if (lt < 0) return "<svg>"
+        val gt = svg.indexOf('>', lt)
+        if (gt < 0) return "<svg>"
+        var tag = svg.substring(lt, gt + 1)
+        // Normalise a self-closing root (extremely rare) to an open tag so we can nest children.
+        if (tag.trimEnd().endsWith("/>")) tag = tag.substring(0, tag.length - 2) + ">"
+        return tag
+    }
 }

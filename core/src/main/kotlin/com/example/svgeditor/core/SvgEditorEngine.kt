@@ -95,7 +95,6 @@ class SvgEditorEngine(
             clearLayers()
             return
         }
-        val others = layout.elements.filter { it.id.isNotBlank() && it.id != id }.map { it.id }
         val w = if (renderW > 0) renderW else imageWidth
         val h = if (renderH > 0) renderH else imageHeight
         if (w <= 0 || h <= 0) {
@@ -103,8 +102,10 @@ class SvgEditorEngine(
             return
         }
         val bgSvg = SvgUtils.hideElement(svg, id)
-        var fgSvg = svg
-        for (oid in others) fgSvg = SvgUtils.hideElement(fgSvg, oid)
+        // Solo the selected element (keep it + its ancestor groups) so a nested element is not
+        // hidden along with an ancestor group. This keeps the foreground layer correct for
+        // elements inside <g> containers — fixing "drag preview vanishes for grouped elements".
+        val fgSvg = SvgUtils.soloElement(svg, id)
         bgPng = renderer.render(bgSvg, w, h).png
         fgPng = renderer.render(fgSvg, w, h).png
     }

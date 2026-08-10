@@ -40,4 +40,38 @@ class SvgUtilsTest {
         assertEquals("7", SvgUtils.fmt(7.0))
         assertTrue(SvgUtils.fmt(3.12340001).matches(Regex("3(\\.\\d+)?")))
     }
+
+    @Test
+    fun `soloElement keeps the ancestor group for a nested element`() {
+        // `inner` lives inside <g id="grp" transform="translate(120,80)">. Soloing it must keep
+        // that ancestor group (so the element keeps its absolute position) and must NOT keep the
+        // unrelated elements (bg / box-a / dot).
+        val solo = SvgUtils.soloElement(svg, "inner")
+        assertTrue(solo.startsWith("<svg"), "solo must keep the <svg> root")
+        assertTrue(solo.trimEnd().endsWith("</svg>"), "solo must be closed")
+        assertTrue(solo.contains("""id="grp""""), "ancestor group must be kept")
+        assertTrue(solo.contains("translate(120,80)"), "ancestor transform must be preserved")
+        assertTrue(solo.contains("""id="inner""""), "target element must be kept")
+        assertFalse(solo.contains("box-a"), "unrelated element must be dropped")
+        assertFalse(solo.contains(""""id="dot""""), "unrelated element must be dropped")
+        assertFalse(solo.contains(""""id="bg""""), "background must be dropped")
+    }
+
+    @Test
+    fun `soloElement for a top-level element drops everything else`() {
+        val solo = SvgUtils.soloElement(svg, "box-a")
+        assertTrue(solo.contains("""id="box-a""""))
+        assertFalse(solo.contains("""id="grp""""), "other groups must be dropped")
+        assertFalse(solo.contains("""id="inner""""), "other elements must be dropped")
+        assertFalse(solo.contains(""""id="dot""""))
+    }
+
+    @Test
+    fun `soloElement for a group keeps its descendants`() {
+        // Selecting the group must keep its child `inner` so the whole group is dragged.
+        val solo = SvgUtils.soloElement(svg, "grp")
+        assertTrue(solo.contains("""id="grp""""))
+        assertTrue(solo.contains("""id="inner""""), "group's child must be kept")
+        assertFalse(solo.contains("box-a"))
+    }
 }
