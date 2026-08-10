@@ -56,7 +56,17 @@ class SvgEditorPanel(
     /** Drag layers (only populated while an element is selected). */
     private var bgImage: BufferedImage? = null
     private var fgImage: BufferedImage? = null
+    /** Foreground cropped to the element's bounding box (+rotation padding) for a cheap blit. */
+    private var fgCrop: BufferedImage? = null
+    private var fgCropX = 0.0
+    private var fgCropY = 0.0
     private var layerId: String? = null
+
+    /** Static composite (background + grid + base raster) baked once per view/selection change. */
+    private var staticLayer: BufferedImage? = null
+    private var staticDirty = true
+    private var staticDrag = false
+    private var staticBgColor: Color? = null
 
     private var viewScale = 1.0
     private var offsetX = 0.0
@@ -203,6 +213,7 @@ class SvgEditorPanel(
         offscreen = decode(engine.png)
         // Keep drag layers crisp after zoom / resize / DPI changes.
         if (selectedId != null) rebuildLayers()
+        staticDirty = true // base raster changed; re-bake the static composite
     }
 
     private fun currentDpi(): Double {
@@ -288,15 +299,51 @@ class SvgEditorPanel(
             bgImage = decode(engine.bgPng)
             fgImage = decode(engine.fgPng)
             layerId = selectedId
+            buildFgCrop()
         } else {
             clearLayers()
         }
+    }
+
+    /**
+     * Crop [fgImage] down to the selected element's bounding box (plus padding so an arbitrary
+     * rotation never clips), so the per-frame foreground blit draws a small image instead of the
+     * whole canvas-sized raster.
+     */
+    private fun buildFgCrop() {
+        val fg = fgImage ?: run { fgCrop = null; return }
+        val el = engine.layout.byId(layerId ?: return) ?: run { fgCrop = null; return }
+        val dpr = dpiScale
+        val sx0 = el.x * viewScale * dpr
+        val sy0 = el.y * viewScale * dpr
+        val sw0 = el.width * viewScale * dpr
+        val sh0 = el.height * viewScale * dpr
+        if (sw0 <= 0.0 || sh0 <= 0.0) {
+            fgCrop = null
+            return
+        }
+        // Pad by the larger dimension so the rect keeps all its corners inside the crop for any angle.
+        val pad = kotlin.math.max(sw0, sh0)
+        var cx0 = (sx0 - pad).coerceAtLeast(0.0)
+        var cy0 = (sy0 - pad).coerceAtLeast(0.0)
+        val right = (sx0 + sw0 + pad).coerceAtMost(fg.width.toDouble())
+        val bottom = (sy0 + sh0 + pad).coerceAtMost(fg.height.toDouble())
+        val cw0 = right - cx0
+        val ch0 = bottom - cy0
+        if (cw0 < 1 || ch0 < 1) {
+            fgCrop = null
+            return
+        }
+        fgCrop = fg.getSubimage(cx0.toInt(), cy0.toInt(), cw0.toInt(), ch0.toInt())
+        fgCropX = cx0
+        fgCropY = cy0
     }
 
     private fun clearLayers() {
         engine.clearLayers()
         bgImage = null
         fgImage = null
+        fgCrop = null
         layerId = null
     }
 
@@ -336,13 +383,10 @@ class SvgEditorPanel(
         pointer.y = y
         val (ix, iy) = toImage(x, y)
         interaction.onDragMove(engine.layout, ix, iy)
-        // paintImmediately is synchronous on the EDT, so the preview follows the cursor
-        // without the lag of an asynchronous repaint().
-        if (canvas.isShowing) {
-            canvas.paintImmediately(0, 0, canvas.width, canvas.height)
-        } else {
-            canvas.repaint()
-        }
+        // repaint() (not paintImmediately) lets Swing coalesce multiple mouse-dragged events
+        // into a single paint aligned with the display refresh — so the EDT is never saturated
+        // by synchronous full-canvas repaints (the previous cause of dropped frames / stutter).
+        canvas.repaint()
     }
 
     private fun handlePress(
@@ -380,6 +424,7 @@ class SvgEditorPanel(
         // (viewScale/dpiScale), so they must be refreshed even if the selection id did not change
         // (e.g. after zooming, or pressing an already-selected element to drag again).
         if (newSel != null) rebuildLayers() else clearLayers()
+        staticDirty = true // drag state / base raster changed; re-bake the static composite
         canvas.repaint()
     }
 
@@ -405,6 +450,7 @@ class SvgEditorPanel(
             }
             null -> {}
         }
+        staticDirty = true // offscreen / selection changed; re-bake the static composite
         canvas.repaint()
         emitStatus()
     }
@@ -465,11 +511,8 @@ class SvgEditorPanel(
     fun debugSetDpi(d: Double) {
         dpiScale = d
         renderAtDeviceSize()
-        if (canvas.isShowing) {
-            canvas.paintImmediately(0, 0, canvas.width, canvas.height)
-        } else {
-            canvas.repaint()
-        }
+        staticDirty = true
+        canvas.repaint()
     }
 
     /** Test hook: render the canvas onto an off-screen image for visual inspection.
@@ -497,18 +540,32 @@ class SvgEditorPanel(
     // ---- rendering --------------------------------------------------------
 
     private fun renderCanvas(g: Graphics2D) {
-        g.color = background
-        g.fillRect(0, 0, width, height)
-
-        drawGrid(g)
-
-        val dragging = interaction.state == InteractionController.State.DRAG
-        if (dragging && layerId != null && bgImage != null && fgImage != null) {
-            // Smooth path: static background + offset/scaled foreground, no resvg.
-            drawScaled(g, bgImage!!)
-            drawFg(g)
+        val wantDrag = interaction.state == InteractionController.State.DRAG &&
+            layerId != null &&
+            fgImage != null
+        if (wantDrag) {
+            // Fast drag path: one 1:1 blit of the pre-baked static composite (background + grid +
+            // base raster with the dragged element hidden) plus the small cropped foreground.
+            if (staticLayer == null || staticDirty || !staticDrag || staticBgColor != background) {
+                staticDrag = true
+                rebuildStaticLayer()
+            }
+            staticLayer?.let { g.drawImage(it, 0, 0, null) }
+                ?: run { g.color = background; g.fillRect(0, 0, width, height) }
+            if (fgCrop != null) {
+                drawFg(g)
+            }
         } else {
+            // Idle path: draw the full render directly. We skip the intermediate static layer for
+            // idle frames because routing `offscreen` through an extra BufferedImage can trigger
+            // Java2D colour-management conversions that shift exact pixel values and break the
+            // headless pixel-consistency checks. Drag frames are unaffected because the dragged
+            // element is supplied by `fgCrop`, not by the base raster.
+            g.color = background
+            g.fillRect(0, 0, width, height)
+            drawGrid(g)
             offscreen?.let { drawScaled(g, it) }
+            staticDirty = true // ensure the next drag re-bakes with the current base raster
         }
 
         drawHover(g)
@@ -529,39 +586,71 @@ class SvgEditorPanel(
     }
 
     /**
+     * Bake the static composite — background fill + grid + the base raster — into a single
+     * [BufferedImage] sized to the panel. During a drag the base raster is [bgImage] (the
+     * selected element hidden, drawn separately as the foreground); otherwise it is [offscreen]
+     * (the full render). Rebuilt only when the view / selection / theme changes.
+     */
+    private fun rebuildStaticLayer() {
+        if (width <= 0 || height <= 0) {
+            staticLayer = null
+            return
+        }
+        val img = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
+        val g2 = img.createGraphics()
+        g2.color = background
+        g2.fillRect(0, 0, width, height)
+        drawGrid(g2)
+        val base = if (staticDrag && bgImage != null) bgImage else offscreen
+        if (base != null) {
+            val dw = (base.width / dpiScale).toInt().coerceAtLeast(1)
+            val dh = (base.height / dpiScale).toInt().coerceAtLeast(1)
+            g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+            g2.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
+            g2.drawImage(base, offsetX.toInt(), offsetY.toInt(), dw, dh, null)
+        }
+        g2.dispose()
+        staticLayer = img
+        staticBgColor = background
+        staticDirty = false
+    }
+
+    /**
      * Composite the foreground (selected element) at the preview box using a single floating
-     * point [java.awt.geom.AffineTransform]. This replaces the old `getSubimage(...).toInt()`
-     * crop, which quantised the source/destination rectangles to integer pixels and produced a
-     * subtle per-frame "jitter" during drags (especially on HiDPI / while resizing). Because
-     * the transform is continuous, move/resize follow the cursor smoothly, and rotation is
-     * supported for free by simply rotating about the destination centre.
+     * point [java.awt.geom.AffineTransform] over the pre-cropped [fgCrop] raster. The crop is
+     * just the element's bounding box (plus rotation padding), so this blits a small image
+     * instead of the whole canvas-sized raster — cheap enough to run every frame at full fps.
+     * The continuous transform means move/resize/rotate follow the cursor smoothly.
      */
     private fun drawFg(g: Graphics2D) {
-        val fg = fgImage ?: return
+        val fg = fgCrop ?: return
         val preview = interaction.previewBox ?: return
         val el = engine.layout.byId(layerId!!) ?: return
         val dpr = dpiScale
-        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
-        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
-        // Source rect of the element within the device-resolution foreground raster.
-        val sx = el.x * viewScale * dpr
-        val sy = el.y * viewScale * dpr
-        val sw = el.width * viewScale * dpr
-        val sh = el.height * viewScale * dpr
-        // Destination rect in logical (panel) pixels.
-        val dx = offsetX + preview.x * viewScale
-        val dy = offsetY + preview.y * viewScale
+        val sw0 = el.width * viewScale * dpr
+        val sh0 = el.height * viewScale * dpr
+        if (sw0 <= 0.0 || sh0 <= 0.0) return
+        // Destination box in logical (panel) pixels.
         val dw = preview.w * viewScale
         val dh = preview.h * viewScale
-        // Compose: translate to dest, scale src->dest, rotate about the element centre, then
-        // shift the source origin to (0,0). Applied right-to-left to the point, so the element
-        // centre maps to the destination centre and rotation pivots there.
+        val dx = offsetX + preview.x * viewScale
+        val dy = offsetY + preview.y * viewScale
+        // Element top-left within the crop, in device pixels.
+        val ex = el.x * viewScale * dpr - fgCropX
+        val ey = el.y * viewScale * dpr - fgCropY
+        val s = dw / sw0
+        val d = dh / sh0
+        val rad = Math.toRadians(interaction.previewAngle)
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
+        // Map the element centre (crop-local) -> the destination centre, scaling then rotating
+        // about that centre. Applied right-to-left, so the centre lands exactly on the preview
+        // box centre regardless of the padding offset baked into the crop.
         val at = java.awt.geom.AffineTransform()
-        at.translate(dx, dy)
-        if (sw != 0.0 && sh != 0.0) at.scale(dw / sw, dh / sh)
-        val angle = interaction.previewAngle
-        if (angle != 0.0) at.rotate(Math.toRadians(angle), sw / 2.0, sh / 2.0)
-        at.translate(-sx, -sy)
+        at.translate(dx + dw / 2.0, dy + dh / 2.0)
+        at.rotate(rad)
+        at.scale(s, d)
+        at.translate(-(ex + sw0 / 2.0), -(ey + sh0 / 2.0))
         g.drawImage(fg, at, null)
     }
 

@@ -182,7 +182,7 @@ fun runDragTest(): Int {
         fun capture(
             tag: String,
             scale: Double = 1.0,
-        ) {
+        ): BufferedImage {
             // Render through a `scale(scale,scale)` Graphics2D — exactly what a HiDPI/Retina
             // display does — so the drag-preview blit is exercised under a real transform.
             val img = BufferedImage((imgW * scale).toInt(), (imgH * scale).toInt(), BufferedImage.TYPE_INT_RGB)
@@ -190,6 +190,7 @@ fun runDragTest(): Int {
             val out = File("dragtest_$tag.png")
             ImageIO.write(img, "png", out)
             println("dragtest: wrote $out (scale=$scale)")
+            return img
         }
 
         val restBox = panel.layout.byId("box-a")!!
@@ -202,10 +203,20 @@ fun runDragTest(): Int {
         println("dragtest: selected BEFORE press = ${panel.selectedElementId}")
         panel.debugPressDrag(center.x, center.y, center.x + 80, center.y + 60)
         println("dragtest: selected AFTER press  = ${panel.selectedElementId}")
-        capture("mid") // live (resvg-free) preview frame
+        val midImg = capture("mid") // live (resvg-free) preview frame
+
+        // Bench: measure per-frame paint cost (proxy for drag smoothness). box-a is selected and
+        // mid-drag here, so this exercises the bgImage + fgCrop + selection path.
+        run {
+            val bench = BufferedImage(imgW, imgH, BufferedImage.TYPE_INT_RGB)
+            val t0 = System.nanoTime()
+            repeat(60) { panel.debugRenderTo(bench, 1.0) }
+            val per = (System.nanoTime() - t0) / 1_000_000.0 / 60.0
+            println("dragtest: paint cost ~= %.2f ms/frame (cached static layer)".format(per))
+        }
 
         panel.debugRelease()
-        capture("after")
+        val afterImg = capture("after")
 
         val afterBox = panel.layout.byId("box-a")!!
         val src = panel.svgSource
@@ -216,9 +227,8 @@ fun runDragTest(): Int {
 
         // Pixel-level check: the dragged element (box-a, green) must sit at the SAME pixel
         // location in the mid-drag frame and the post-release frame. A mismatch here is the
-        // exact "dropped position != final position" bug.
-        val midImg = ImageIO.read(File("dragtest_mid.png"))
-        val afterImg = ImageIO.read(File("dragtest_after.png"))
+        // exact "dropped position != final position" bug. Centroids are computed from the
+        // in-memory images to avoid Java's PNG color-space round-trip shifting pixel values.
         val midC = greenCentroid(midImg)
         val afterC = greenCentroid(afterImg)
         println("dragtest: box-a green centroid  mid=$midC  after=$afterC")
@@ -244,12 +254,12 @@ fun runDragTest(): Int {
         val center2 = panel.debugElementCenterPx("box-a") ?: error("box-a center is null (dpr=2)")
         println("dragtest[dpr=2]: box-a center(px) = $center2")
         panel.debugPressDrag(center2.x, center2.y, center2.x + 80, center2.y + 60)
-        capture("mid2", scale = 2.0)
+        val mid2Img = capture("mid2", scale = 2.0)
         panel.debugRelease()
-        capture("after2", scale = 2.0)
+        val after2Img = capture("after2", scale = 2.0)
         // Centroids are in device px here (image is 2x); compare within the same scale.
-        val mid2 = greenCentroid(ImageIO.read(File("dragtest_mid2.png")))
-        val after2 = greenCentroid(ImageIO.read(File("dragtest_after2.png")))
+        val mid2 = greenCentroid(mid2Img)
+        val after2 = greenCentroid(after2Img)
         println("dragtest[dpr=2]: box-a green centroid  mid=$mid2  after=$after2")
         if (mid2 != null && after2 != null) {
             val dpx = kotlin.math.abs(mid2.first - after2.first)
@@ -269,11 +279,11 @@ fun runDragTest(): Int {
         val seX = (24.0 + (10.0 + 80.0) * 2.96).toInt() // offsetX + (x+w)*viewScale (~290)
         val seY = (32.4 + (10.0 + 60.0) * 2.96).toInt() // offsetY + (y+h)*viewScale (~240)
         panel.debugPressDrag(seX, seY, seX + 60, seY + 40)
-        capture("midResize")
+        val midResizeImg = capture("midResize")
         panel.debugRelease()
-        capture("afterResize")
-        val rMid = greenCentroid(ImageIO.read(File("dragtest_midResize.png")))
-        val rAfter = greenCentroid(ImageIO.read(File("dragtest_afterResize.png")))
+        val afterResizeImg = capture("afterResize")
+        val rMid = greenCentroid(midResizeImg)
+        val rAfter = greenCentroid(afterResizeImg)
         println("dragtest[resize]: box-a green centroid  mid=$rMid  after=$rAfter")
         if (rMid != null && rAfter != null) {
             val dpx = kotlin.math.abs(rMid.first - rAfter.first)
@@ -288,11 +298,11 @@ fun runDragTest(): Int {
         panel.loadSvg(Samples.SIMPLE)
         val nCenter = panel.debugElementCenterPx("inner")!!
         panel.debugPressDrag(nCenter.x, nCenter.y, nCenter.x + 50, nCenter.y + 30)
-        capture("midNested")
+        val midNestedImg = capture("midNested")
         panel.debugRelease()
-        capture("afterNested")
-        val nMid = blueCentroid(ImageIO.read(File("dragtest_midNested.png")))
-        val nAfter = blueCentroid(ImageIO.read(File("dragtest_afterNested.png")))
+        val afterNestedImg = capture("afterNested")
+        val nMid = blueCentroid(midNestedImg)
+        val nAfter = blueCentroid(afterNestedImg)
         println("dragtest[nested]: inner blue centroid  mid=$nMid  after=$nAfter")
         if (nMid != null && nAfter != null) {
             val dpx = kotlin.math.abs(nMid.first - nAfter.first)
@@ -312,13 +322,13 @@ fun runDragTest(): Int {
         val rhx = (24.0 + (10.0 + 80.0 / 2.0) * 2.96)
         val rhy = (32.4 + 10.0 * 2.96) - 22.0
         panel.debugPressDrag(rhx.toInt(), rhy.toInt(), rhx.toInt() + 80, rhy.toInt())
-        capture("midRotate")
+        val midRotateImg = capture("midRotate")
         panel.debugRelease()
-        capture("afterRotate")
+        val afterRotateImg = capture("afterRotate")
         val srcR = panel.svgSource
         println("dragtest[rotate]: box-a transform in source = ${Regex("""id="box-a"[^>]*transform="([^"]*)"""").find(srcR)?.groupValues?.get(1)}")
-        val rotMid = greenCentroid(ImageIO.read(File("dragtest_midRotate.png")))
-        val rotAfter = greenCentroid(ImageIO.read(File("dragtest_afterRotate.png")))
+        val rotMid = greenCentroid(midRotateImg)
+        val rotAfter = greenCentroid(afterRotateImg)
         println("dragtest[rotate]: box-a green centroid  mid=$rotMid  after=$rotAfter")
         if (rotMid != null && rotAfter != null) {
             val dpx = kotlin.math.abs(rotMid.first - rotAfter.first)
