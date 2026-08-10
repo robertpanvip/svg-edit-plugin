@@ -91,4 +91,38 @@ class InteractionControllerTest {
         assertEquals("box-a", ctrl.selected?.id)
         assertNull(h) // hover logic is suppressed during drag
     }
+
+    @Test
+    fun `rotate handle drag rotates about the element centre`() {
+        val ctrl = InteractionController()
+        ctrl.onDoubleClick(layout, 50.0, 40.0) // select box-a (centre 50,40)
+        // Start a rotation with the pointer to the right of the centre (angle 0 deg).
+        ctrl.startRotate(50.0, 40.0, 0.0)
+        assertEquals(InteractionController.EditMode.ROTATE, ctrl.editMode)
+        assertEquals(InteractionController.State.DRAG, ctrl.state)
+        // Swing the pointer to the bottom of the centre (angle 90 deg) -> +90 deg rotation.
+        val res = ctrl.onDragMove(layout, 50.0, 140.0)
+        assertTrue(res is InteractionController.EditResult.Rotate)
+        res as InteractionController.EditResult.Rotate
+        assertEquals(90.0, res.angle, 1e-6)
+        assertEquals(50.0, res.cx, 1e-9)
+        assertEquals(40.0, res.cy, 1e-9)
+        assertEquals(90.0, ctrl.previewAngle, 1e-6)
+        val rel = ctrl.onMouseReleased()
+        assertTrue(rel is InteractionController.EditResult.Rotate)
+        assertEquals(InteractionController.State.IDLE, ctrl.state)
+        assertEquals(0.0, ctrl.previewAngle, 1e-9)
+    }
+
+    @Test
+    fun `rotate angle is normalised across the 180 degree seam`() {
+        val ctrl = InteractionController()
+        ctrl.onDoubleClick(layout, 50.0, 40.0)
+        ctrl.startRotate(50.0, 40.0, 170.0) // pointer near +170
+        // Drag straight up: angle -90. Swing of -260 deg normalises to +100.
+        val res = ctrl.onDragMove(layout, 50.0, -60.0)
+        assertTrue(res is InteractionController.EditResult.Rotate)
+        res as InteractionController.EditResult.Rotate
+        assertEquals(100.0, res.angle, 1e-6)
+    }
 }

@@ -18,7 +18,7 @@ package com.example.svgeditor.core
  */
 class InteractionController {
     enum class State { IDLE, DRAG }
-    enum class EditMode { NONE, MOVE, RESIZE }
+    enum class EditMode { NONE, MOVE, RESIZE, ROTATE }
     enum class Handle { NW, N, NE, E, SE, S, SW, W }
 
     /** Axis-aligned box in SVG/canvas units. */
@@ -46,6 +46,17 @@ class InteractionController {
             val w: Double,
             val h: Double,
         ) : EditResult()
+
+        /**
+         * Rotation about a canvas-space point `(cx, cy)` by `angle` degrees (relative delta from
+         * the grab angle). The centre does NOT move, so the rotation is idempotent about it.
+         */
+        data class Rotate(
+            val element: SvgElement,
+            val angle: Double,
+            val cx: Double,
+            val cy: Double,
+        ) : EditResult()
     }
 
     var state: State = State.IDLE
@@ -66,6 +77,11 @@ class InteractionController {
         internal set
     var editMode: EditMode = EditMode.NONE
         private set
+    var previewAngle: Double = 0.0
+        internal set
+    private var rotateCenterX = 0.0
+    private var rotateCenterY = 0.0
+    private var rotateStartPointerAngle = 0.0
 
     private var dragStartX = 0.0
     private var dragStartY = 0.0
@@ -73,7 +89,7 @@ class InteractionController {
     private var resizeHandle: Handle? = null
 
     private val handles: List<Handle> = Handle.entries.toList()
-    private val snapThreshold = 5.0 // svg units
+    private val snapThreshold = 4.0 // svg units
 
     /** Pointer moved with no button pressed: refresh hover (+ which handle is under it). */
     fun onHoverMove(
@@ -103,12 +119,31 @@ class InteractionController {
             selectedHandle = null
             editMode = EditMode.NONE
             state = State.IDLE
+            previewAngle = 0.0
             true
         } else {
             selected = null
             selectedHandle = null
             false
         }
+    }
+
+    /** Begin a rotation drag: the pointer is on the rotate handle above the selection box. */
+    fun startRotate(
+        centerX: Double,
+        centerY: Double,
+        pointerAngleDeg: Double,
+    ) {
+        snapLines = emptyList()
+        selectedHandle = null
+        editMode = EditMode.ROTATE
+        state = State.DRAG
+        rotateCenterX = centerX
+        rotateCenterY = centerY
+        rotateStartPointerAngle = pointerAngleDeg
+        previewAngle = 0.0
+        startBox = selected?.let { boxOf(it) }
+        previewBox = selected?.let { boxOf(it) }
     }
 
     /**
@@ -183,21 +218,36 @@ class InteractionController {
         pointerY = y
         if (state != State.DRAG) return null
         val sb = startBox ?: return null
-        val dx = x - dragStartX
-        val dy = y - dragStartY
-        val raw =
-            when (editMode) {
-                EditMode.MOVE -> Box(sb.x + dx, sb.y + dy, sb.w, sb.h)
-                EditMode.RESIZE -> computeResize(sb, resizeHandle!!, dx, dy)
-                EditMode.NONE -> return null
-            }
         val sel = selected ?: return null
-        val (snapped, lines) = applySnap(_layout, sel, raw)
-        previewBox = snapped
-        snapLines = lines
         return when (editMode) {
-            EditMode.MOVE -> EditResult.Move(sel, snapped.x - sb.x, snapped.y - sb.y)
-            EditMode.RESIZE -> EditResult.Resize(sel, snapped.x, snapped.y, snapped.w, snapped.h)
+            EditMode.MOVE -> {
+                val dx = x - dragStartX
+                val dy = y - dragStartY
+                val raw = Box(sb.x + dx, sb.y + dy, sb.w, sb.h)
+                val (snapped, lines) = applySnap(_layout, sel, raw)
+                previewBox = snapped
+                snapLines = lines
+                EditResult.Move(sel, snapped.x - sb.x, snapped.y - sb.y)
+            }
+            EditMode.RESIZE -> {
+                val dx = x - dragStartX
+                val dy = y - dragStartY
+                val raw = computeResize(sb, resizeHandle!!, dx, dy)
+                val (snapped, lines) = applySnap(_layout, sel, raw)
+                previewBox = snapped
+                snapLines = lines
+                EditResult.Resize(sel, snapped.x, snapped.y, snapped.w, snapped.h)
+            }
+            EditMode.ROTATE -> {
+                val cur = kotlin.math.atan2(y - rotateCenterY, x - rotateCenterX) * 180.0 / Math.PI
+                var delta = cur - rotateStartPointerAngle
+                while (delta > 180) delta -= 360.0
+                while (delta <= -180) delta += 360.0
+                previewAngle = delta
+                previewBox = boxOf(sel)
+                snapLines = emptyList()
+                EditResult.Rotate(sel, previewAngle, rotateCenterX, rotateCenterY)
+            }
             EditMode.NONE -> null
         }
     }
@@ -222,6 +272,8 @@ class InteractionController {
                             previewBox!!.w,
                             previewBox!!.h,
                         )
+                    EditMode.ROTATE ->
+                        EditResult.Rotate(selected!!, previewAngle, rotateCenterX, rotateCenterY)
                     EditMode.NONE -> null
                 }
             state = State.IDLE
@@ -229,6 +281,7 @@ class InteractionController {
             resizeHandle = null
             hovered = null
             previewBox = null
+            previewAngle = 0.0
             return res
         }
         state = State.IDLE

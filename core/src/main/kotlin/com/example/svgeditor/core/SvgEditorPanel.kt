@@ -351,6 +351,28 @@ class SvgEditorPanel(
     ) {
         val (ix, iy) = toImage(x, y)
         val tol = 6.0 / viewScale
+        // The rotate handle (a circle above the selection box) takes priority over body/resize
+        // hits. It is only reachable once an element is already selected.
+        selectedId?.let { sid ->
+            engine.layout.byId(sid)?.let { el ->
+                val rx = offsetX + el.x * viewScale
+                val ry = offsetY + el.y * viewScale
+                val rw = el.width * viewScale
+                val rh = el.height * viewScale
+                val hcx = rx + rw / 2.0
+                val hcy = ry - ROTATE_OFFSET
+                if (kotlin.math.hypot(x - hcx, y - hcy) <= (ROTATE_R + 6.0)) {
+                    val cxSvg = el.x + el.width / 2.0
+                    val cySvg = el.y + el.height / 2.0
+                    val ang = kotlin.math.atan2(iy - cySvg, ix - cxSvg) * 180.0 / Math.PI
+                    selectedId = sid
+                    interaction.startRotate(cxSvg, cySvg, ang)
+                    rebuildLayers()
+                    canvas.repaint()
+                    return
+                }
+            }
+        }
         interaction.onMousePressed(engine.layout, ix, iy, tol)
         val newSel = interaction.selected?.id
         selectedId = newSel
@@ -371,6 +393,12 @@ class SvgEditorPanel(
             }
             is InteractionController.EditResult.Resize -> {
                 engine.setElementBox(res.element.id, res.x, res.y, res.w, res.h)
+                offscreen = decode(engine.png)
+                selectedId = res.element.id
+                rebuildLayers()
+            }
+            is InteractionController.EditResult.Rotate -> {
+                engine.rotateElement(res.element.id, res.angle, res.cx, res.cy)
                 offscreen = decode(engine.png)
                 selectedId = res.element.id
                 rebuildLayers()
@@ -501,30 +529,40 @@ class SvgEditorPanel(
     }
 
     /**
-     * Composite the foreground (selected element) at the preview box, by cropping its region
-     * out of the foreground raster and drawing it at the target box. Works for both move and
-     * resize because [InteractionController.previewBox] already holds the target geometry.
+     * Composite the foreground (selected element) at the preview box using a single floating
+     * point [java.awt.geom.AffineTransform]. This replaces the old `getSubimage(...).toInt()`
+     * crop, which quantised the source/destination rectangles to integer pixels and produced a
+     * subtle per-frame "jitter" during drags (especially on HiDPI / while resizing). Because
+     * the transform is continuous, move/resize follow the cursor smoothly, and rotation is
+     * supported for free by simply rotating about the destination centre.
      */
     private fun drawFg(g: Graphics2D) {
-        val el = engine.layout.byId(layerId!!) ?: return
+        val fg = fgImage ?: return
         val preview = interaction.previewBox ?: return
+        val el = engine.layout.byId(layerId!!) ?: return
         val dpr = dpiScale
-        // Source crop in device pixels within the cached foreground raster.
-        val sxp = (el.x * viewScale * dpr).toInt().coerceAtLeast(0)
-        val syp = (el.y * viewScale * dpr).toInt().coerceAtLeast(0)
-        val swp = (el.width * viewScale * dpr).toInt().coerceAtLeast(1)
-        val shp = (el.height * viewScale * dpr).toInt().coerceAtLeast(1)
-        // Destination box in panel pixels.
-        val txp = offsetX + preview.x * viewScale
-        val typ = offsetY + preview.y * viewScale
-        val twp = preview.w * viewScale
-        val thp = preview.h * viewScale
-        if (sxp + swp > (fgImage?.width ?: 0) || syp + shp > (fgImage?.height ?: 0)) return
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
-        // Use a subimage so we get x,y,width,height semantics instead of the error-prone
-        // drawImage(..., sx1, sy1, sx2, sy2) overload where x2/y2 are coordinates.
-        val crop = fgImage!!.getSubimage(sxp, syp, swp, shp)
-        g.drawImage(crop, txp.toInt(), typ.toInt(), twp.toInt(), thp.toInt(), null)
+        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
+        // Source rect of the element within the device-resolution foreground raster.
+        val sx = el.x * viewScale * dpr
+        val sy = el.y * viewScale * dpr
+        val sw = el.width * viewScale * dpr
+        val sh = el.height * viewScale * dpr
+        // Destination rect in logical (panel) pixels.
+        val dx = offsetX + preview.x * viewScale
+        val dy = offsetY + preview.y * viewScale
+        val dw = preview.w * viewScale
+        val dh = preview.h * viewScale
+        // Compose: translate to dest, scale src->dest, rotate about the element centre, then
+        // shift the source origin to (0,0). Applied right-to-left to the point, so the element
+        // centre maps to the destination centre and rotation pivots there.
+        val at = java.awt.geom.AffineTransform()
+        at.translate(dx, dy)
+        if (sw != 0.0 && sh != 0.0) at.scale(dw / sw, dh / sh)
+        val angle = interaction.previewAngle
+        if (angle != 0.0) at.rotate(Math.toRadians(angle), sw / 2.0, sh / 2.0)
+        at.translate(-sx, -sy)
+        g.drawImage(fg, at, null)
     }
 
     private fun drawGrid(g: Graphics2D) {
@@ -559,44 +597,75 @@ class SvgEditorPanel(
     }
 
     private fun drawSelection(g: Graphics2D) {
-        selectedId?.let { engine.layout.byId(it) }?.let { el ->
-            // While dragging, the box tracks the (snapped) preview box so the edit box follows
-            // the element; otherwise it sits on the element's resting geometry.
-            val box = interaction.previewBox
-                ?: InteractionController.Box(el.x, el.y, el.width, el.height)
-            val rx = (offsetX + box.x * viewScale).toInt()
-            val ry = (offsetY + box.y * viewScale).toInt()
-            val rw = (box.w * viewScale).toInt()
-            val rh = (box.h * viewScale).toInt()
+        selectedId?.let { id ->
+            engine.layout.byId(id)?.let { el ->
+                // While dragging, the box tracks the (snapped) preview box; otherwise it sits on
+                // the element's resting geometry. previewAngle rotates the whole overlay.
+                val box = interaction.previewBox
+                    ?: InteractionController.Box(el.x, el.y, el.width, el.height)
+                val rad = Math.toRadians(interaction.previewAngle)
+                val bcx = offsetX + (box.x + box.w / 2) * viewScale
+                val bcy = offsetY + (box.y + box.h / 2) * viewScale
+                val rot: (Double, Double) -> Pair<Double, Double> = { px, py -> rotatePt(px, py, bcx, bcy, rad) }
 
-            // Selection rectangle.
-            g.color = ACCENT
-            g.stroke = BasicStroke(1.5f)
-            g.drawRect(rx, ry, rw, rh)
-
-            // Rotate handle: a line up from the top-centre to a circular grip.
-            val cx = rx + rw / 2
-            val handleY = ry - ROTATE_OFFSET
-            g.drawLine(cx, ry, cx, handleY)
-            g.color = Color.WHITE
-            g.fillOval(cx - ROTATE_R, handleY - ROTATE_R, ROTATE_R * 2, ROTATE_R * 2)
-            g.color = ACCENT
-            g.stroke = BasicStroke(1.5f)
-            g.drawOval(cx - ROTATE_R, handleY - ROTATE_R, ROTATE_R * 2, ROTATE_R * 2)
-
-            // 8 control points (white fill, accent outline).
-            val s = HANDLE
-            for (h in InteractionController.Handle.entries) {
-                val (hx, hy) = interaction.handlePoint(box, h)
-                val px = (offsetX + hx * viewScale).toInt()
-                val py = (offsetY + hy * viewScale).toInt()
-                g.color = Color.WHITE
-                g.fillRect(px - s / 2, py - s / 2, s, s)
+                // Selection outline (rotated polygon).
+                val corners =
+                    arrayOf(
+                        rot(offsetX + box.x * viewScale, offsetY + box.y * viewScale),
+                        rot(offsetX + (box.x + box.w) * viewScale, offsetY + box.y * viewScale),
+                        rot(offsetX + (box.x + box.w) * viewScale, offsetY + (box.y + box.h) * viewScale),
+                        rot(offsetX + box.x * viewScale, offsetY + (box.y + box.h) * viewScale),
+                    )
                 g.color = ACCENT
                 g.stroke = BasicStroke(1.5f)
-                g.drawRect(px - s / 2, py - s / 2, s, s)
+                for (i in 0..3) {
+                    val a = corners[i]
+                    val b = corners[(i + 1) % 4]
+                    g.drawLine(a.first.toInt(), a.second.toInt(), b.first.toInt(), b.second.toInt())
+                }
+
+                // 8 control points (white fill, accent outline).
+                val s = HANDLE
+                for (h in InteractionController.Handle.entries) {
+                    val (hx, hy) = interaction.handlePoint(box, h)
+                    val (px, py) = rot(offsetX + hx * viewScale, offsetY + hy * viewScale)
+                    g.color = Color.WHITE
+                    g.fillRect(px.toInt() - s / 2, py.toInt() - s / 2, s, s)
+                    g.color = ACCENT
+                    g.stroke = BasicStroke(1.5f)
+                    g.drawRect(px.toInt() - s / 2, py.toInt() - s / 2, s, s)
+                }
+
+                // Rotate handle: a line from the top-centre of the box up to a circular grip.
+                val topCx = offsetX + (box.x + box.w / 2) * viewScale
+                val topCy = offsetY + box.y * viewScale
+                val (lx, ly) = rot(topCx, topCy)
+                val (hx, hy) = rot(topCx, topCy - ROTATE_OFFSET)
+                g.color = ACCENT
+                g.stroke = BasicStroke(1.5f)
+                g.drawLine(lx.toInt(), ly.toInt(), hx.toInt(), hy.toInt())
+                g.color = Color.WHITE
+                g.fillOval(hx.toInt() - ROTATE_R, hy.toInt() - ROTATE_R, ROTATE_R * 2, ROTATE_R * 2)
+                g.color = ACCENT
+                g.stroke = BasicStroke(1.5f)
+                g.drawOval(hx.toInt() - ROTATE_R, hy.toInt() - ROTATE_R, ROTATE_R * 2, ROTATE_R * 2)
             }
         }
+    }
+
+    /** Rotate a panel-space point `(px,py)` about `(cx,cy)` by `rad` radians (y-down / clockwise). */
+    private fun rotatePt(
+        px: Double,
+        py: Double,
+        cx: Double,
+        cy: Double,
+        rad: Double,
+    ): Pair<Double, Double> {
+        val s = kotlin.math.sin(rad)
+        val c = kotlin.math.cos(rad)
+        val dx = px - cx
+        val dy = py - cy
+        return (cx + dx * c - dy * s) to (cy + dx * s + dy * c)
     }
 
     private fun drawSnap(g: Graphics2D) {

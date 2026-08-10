@@ -50,6 +50,64 @@ object SvgUtils {
     }
 
     /**
+     * Prepend `rotate(a, cx, cy)` to the element's `transform` list (placed BEFORE any existing
+     * transform). Because SVG applies transforms right-to-left, a prepended transform is the LAST
+     * to be applied — i.e. it operates in the element's already-transformed (canvas) coordinate
+     * space. That is exactly what "rotate around the element's canvas-space centre" needs, and it
+     * preserves any prior `translate`/`rotate` already on the element so repeated edits compose
+     * instead of overwriting each other.
+     */
+    fun prependRotate(
+        svg: String,
+        id: String,
+        angleDeg: Double,
+        cx: Double,
+        cy: Double,
+    ): String = prependTransform(svg, id, "rotate(${fmt(angleDeg)}, ${fmt(cx)}, ${fmt(cy)})")
+
+    /** Prepend a `matrix(...)` value to the element's transform list (see [prependRotate]). */
+    fun prependMatrix(
+        svg: String,
+        id: String,
+        matrixAttr: String,
+    ): String = prependTransform(svg, id, matrixAttr)
+
+    /**
+     * Insert `value` as the FIRST entry of the element's `transform` attribute, or create the
+     * attribute with just `value` when absent. Internal helper shared by [prependRotate] /
+     * [prependMatrix].
+     */
+    private fun prependTransform(
+        svg: String,
+        id: String,
+        value: String,
+    ): String {
+        val idRegex = Regex("""id\s*=\s*["']${Regex.escape(id)}["']""")
+        val m = idRegex.find(svg) ?: return svg
+        val idStart = m.range.first
+        val tagStart = svg.lastIndexOf('<', idStart)
+        if (tagStart < 0) return svg
+        val tagEnd = svg.indexOf('>', idStart)
+        if (tagEnd < 0) return svg
+
+        val tag = svg.substring(tagStart, tagEnd + 1)
+        val selfClosing = tag.trimEnd().endsWith("/>")
+        val transformRegex = Regex("""transform\s*=\s*["']([^"']*)["']""")
+        val newTag =
+            transformRegex.find(tag)?.let { tm ->
+                val combined = "$value ${tm.groupValues[1]}"
+                tag.replace(tm.value, """transform="$combined"""")
+            } ?: run {
+                if (selfClosing) {
+                    tag.substring(0, tag.length - 2) + """ transform="$value" />"""
+                } else {
+                    tag.substring(0, tag.length - 1) + """ transform="$value" >"""
+                }
+            }
+        return svg.substring(0, tagStart) + newTag + svg.substring(tagEnd + 1)
+    }
+
+    /**
      * Replace (or insert, when absent) the `transform` attribute on the element with the
      * given `id`. Used by resize editing, which rewrites the element to a `matrix(...)`.
      */

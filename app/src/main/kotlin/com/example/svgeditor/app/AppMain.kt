@@ -302,6 +302,33 @@ fun runDragTest(): Int {
         }
         println("DRAGTEST OK (nested phase consistent)")
 
+        // ---- Rotate phase: grab the rotate handle above box-a and swing it. The element must
+        // rotate about its own centre; the affine preview (mid) and the committed resvg render
+        // (after) must land the element at the SAME pixels (no drop-vs-final gap, no jitter). ----
+        panel.loadSvg(Samples.SIMPLE)
+        val rotCenter = panel.debugElementCenterPx("box-a")!!
+        panel.debugDoubleClick(rotCenter.x, rotCenter.y) // select box-a
+        // Rotate handle sits directly above the box top-centre (ROTATE_OFFSET = 22 px up).
+        val rhx = (24.0 + (10.0 + 80.0 / 2.0) * 2.96)
+        val rhy = (32.4 + 10.0 * 2.96) - 22.0
+        panel.debugPressDrag(rhx.toInt(), rhy.toInt(), rhx.toInt() + 80, rhy.toInt())
+        capture("midRotate")
+        panel.debugRelease()
+        capture("afterRotate")
+        val srcR = panel.svgSource
+        println("dragtest[rotate]: box-a transform in source = ${Regex("""id="box-a"[^>]*transform="([^"]*)"""").find(srcR)?.groupValues?.get(1)}")
+        val rotMid = greenCentroid(ImageIO.read(File("dragtest_midRotate.png")))
+        val rotAfter = greenCentroid(ImageIO.read(File("dragtest_afterRotate.png")))
+        println("dragtest[rotate]: box-a green centroid  mid=$rotMid  after=$rotAfter")
+        if (rotMid != null && rotAfter != null) {
+            val dpx = kotlin.math.abs(rotMid.first - rotAfter.first)
+            val dpy = kotlin.math.abs(rotMid.second - rotAfter.second)
+            println("dragtest[rotate]: mid<->after pixel delta = (${"%.1f".format(dpx)}, ${"%.1f".format(dpy)})")
+            require(dpx < 6 && dpy < 6) { "rotate: element landed at a different pixel than the preview (delta=($dpx,$dpy))" }
+        }
+        require("rotate(" in srcR) { "no rotate(..) written to source SVG" }
+        println("DRAGTEST OK (rotate phase consistent)")
+
         return 0
     } catch (e: Throwable) {
         println("DRAGTEST FAILED: ${e.message}")

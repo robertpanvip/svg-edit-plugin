@@ -74,4 +74,19 @@ class SvgUtilsTest {
         assertTrue(solo.contains("""id="inner""""), "group's child must be kept")
         assertFalse(solo.contains("box-a"))
     }
+
+    @Test
+    fun `prependRotate inserts rotate before an existing transform`() {
+        val s = """<svg><rect id="a" transform="translate(10, 20)"/></svg>"""
+        val out = SvgUtils.prependRotate(s, "a", 45.0, 5.0, 6.0)
+        assertTrue(out.contains("""transform="rotate(45, 5, 6) translate(10, 20)""""), out)
+    }
+
+    @Test
+    fun `prependRotate creates the transform attribute when absent`() {
+        val s = """<svg><rect id="a"/></svg>"""
+        val out = SvgUtils.prependRotate(s, "a", 30.0, 0.0, 0.0)
+        assertTrue(out.contains("""transform="rotate(30, 0, 0)""""), out)
+        assertTrue(out.startsWith("<svg") && out.trimEnd().endsWith("</svg>"))
+    }
 }

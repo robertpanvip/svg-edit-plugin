@@ -139,9 +139,30 @@ class SvgEditorEngine(
     }
 
     /**
+     * Rotate the element about the canvas-space point `(cx, cy)` by `angleDeg` degrees. The
+     * rotation is PREPENDED to the element's existing transform, so repeated rotations compose
+     * (each is about the element's centre, which never moves under rotation) and any prior
+     * translate/scale is preserved.
+     */
+    fun rotateElement(
+        id: String,
+        angleDeg: Double,
+        cx: Double,
+        cy: Double,
+    ): Boolean {
+        if (angleDeg == 0.0) return false
+        val updated = SvgUtils.prependRotate(svg, id, angleDeg, cx, cy)
+        if (updated == svg) return false
+        svg = updated
+        reload()
+        return true
+    }
+
+    /**
      * Resize/move an element so its absolute bounding box becomes `(x, y, w, h)` (SVG units).
-     * Implemented by rewriting the element's `transform` to `matrix(...)` derived from its
-     * original geometry, so the edit is exact and composes with prior transforms.
+     * Implemented by PREPENDING a `matrix(...)` that maps the element's CURRENT box onto the
+     * target box, so the edit composes with any prior transform (translate/rotate/scale) instead
+     * of overwriting it — e.g. rotating then resizing keeps the rotation.
      */
     fun setElementBox(
         id: String,
@@ -151,23 +172,24 @@ class SvgEditorEngine(
         h: Double,
     ): Boolean {
         if (w <= 0 || h <= 0) return false
-        val g = geom[id] ?: return false
-        val (origMatrix, origBox) = g
-        val sx = w / origBox.w
-        val sy = h / origBox.h
-        // Affine X maps the original box -> the target box (scale then translate).
+        val el = layout.byId(id) ?: return false
+        val cbw = el.width
+        val cbh = el.height
+        if (cbw <= 0 || cbh <= 0) return false
+        val sx = w / cbw
+        val sy = h / cbh
+        // Affine maps the current box -> the target box (scale then translate).
         val xform =
             doubleArrayOf(
                 sx,
                 0.0,
                 0.0,
                 sy,
-                x - sx * origBox.x,
-                y - sy * origBox.y,
+                x - sx * el.x,
+                y - sy * el.y,
             )
-        val combined = affineMultiply(xform, origMatrix)
-        val attr = SvgUtils.matrixAttr(combined)
-        val updated = SvgUtils.setTransform(svg, id, attr)
+        val attr = SvgUtils.matrixAttr(xform)
+        val updated = SvgUtils.prependMatrix(svg, id, attr)
         if (updated == svg) return false
         svg = updated
         reload()

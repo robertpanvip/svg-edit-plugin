@@ -67,4 +67,34 @@ class EngineFakeRendererTest {
         engine.renderAt(400, 240)
         assertEquals(5, engine.layout.elements.size)
     }
+
+    @Test
+    fun `rotateElement prepends a rotate transform`() {
+        val engine = SvgEditorEngine(FakeSvgRenderer())
+        engine.load(Samples.SIMPLE)
+        assertTrue(engine.rotateElement("box-a", 45.0, 50.0, 40.0))
+        assertTrue(engine.svgSource.contains("rotate(45, 50, 40)"), engine.svgSource)
+    }
+
+    @Test
+    fun `rotation composes with a prior move`() {
+        val engine = SvgEditorEngine(FakeSvgRenderer())
+        engine.load(Samples.SIMPLE)
+        engine.moveElement("box-a", 10.0, 0.0) // append translate
+        engine.rotateElement("box-a", 30.0, 50.0, 40.0) // prepend rotate
+        assertTrue(
+            engine.svgSource.contains("""transform="rotate(30, 50, 40) translate(10, 0)""""),
+            engine.svgSource,
+        )
+    }
+
+    @Test
+    fun `setElementBox preserves a prior rotation`() {
+        val engine = SvgEditorEngine(FakeSvgRenderer())
+        engine.load(Samples.SIMPLE)
+        engine.rotateElement("box-a", 45.0, 50.0, 40.0)
+        engine.setElementBox("box-a", 10.0, 10.0, 160.0, 120.0) // 2x scale
+        assertTrue(engine.svgSource.contains("rotate(45, 50, 40)"), "rotation must survive a resize")
+        assertTrue(engine.svgSource.contains("matrix(2, 0, 0, 2"), "resize must still emit matrix(...)")
+    }
 }
