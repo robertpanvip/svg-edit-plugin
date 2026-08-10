@@ -92,6 +92,56 @@ class InteractionControllerTest {
     }
 
     @Test
+    fun `repro S handle dragged down keeps top fixed (grows downward)`() {
+        val ctrl = InteractionController()
+        ctrl.onDoubleClick(layout, 50.0, 40.0) // select box-a (10,10,80,60)
+        ctrl.onMousePressed(layout, 50.0, 70.0) // S handle at (50,70)
+        assertEquals(InteractionController.EditMode.RESIZE, ctrl.editMode)
+        ctrl.onDragMove(layout, 50.0, 110.0) // dy = +40 (downward)
+        val box = ctrl.previewBox!!
+        println("REPRO S-down previewBox = $box")
+        assertEquals(10.0, box.x, 1e-9)
+        assertEquals(10.0, box.y, 1e-9) // top must NOT move up
+        assertEquals(80.0, box.w, 1e-9)
+        assertEquals(100.0, box.h, 1e-9)
+    }
+
+    @Test
+    fun `repro SW handle dragged down updates height`() {
+        val ctrl = InteractionController()
+        ctrl.onDoubleClick(layout, 50.0, 40.0)
+        ctrl.onMousePressed(layout, 10.0, 70.0) // SW handle at (10,70)
+        assertEquals(InteractionController.EditMode.RESIZE, ctrl.editMode)
+        ctrl.onDragMove(layout, 10.0, 110.0) // dx=0, dy=+40 (downward)
+        val box = ctrl.previewBox!!
+        println("REPRO SW-down previewBox = $box")
+        assertEquals(10.0, box.x, 1e-9)
+        assertEquals(10.0, box.y, 1e-9)
+        assertEquals(80.0, box.w, 1e-9)
+        assertEquals(100.0, box.h, 1e-9) // height MUST grow when dragging SW down
+    }
+
+    @Test
+    fun `repro S handle downward near a lower neighbour still keeps top fixed`() {
+        // Custom layout: box-a (10,10,80,60) with a neighbour just below it.
+        val custom =
+            SvgLayout.parse(
+                """{"width":200.0,"height":300.0,"elements":[
+            {"index":0,"id":"box-a","kind":"path","x":10.0,"y":10.0,"width":80.0,"height":60.0,"transform":[1,0,0,1,0,0]},
+            {"index":1,"id":"below","kind":"path","x":10.0,"y":200.0,"width":80.0,"height":30.0,"transform":[1,0,0,1,0,0]}
+          ]}""",
+            )
+        val ctrl = InteractionController()
+        ctrl.onDoubleClick(custom, 50.0, 40.0) // select box-a
+        ctrl.onMousePressed(custom, 50.0, 70.0) // S handle
+        ctrl.onDragMove(custom, 50.0, 190.0) // dy = +120, bottom edge approaches 'below' top (y=200)
+        val box = ctrl.previewBox!!
+        println("REPRO S-down-neighbour previewBox = $box")
+        assertEquals(10.0, box.x, 1e-9)
+        assertEquals(10.0, box.y, 1e-9) // anchor top must stay put even when snapping the bottom edge
+    }
+
+    @Test
     fun `hover highlights the element under the pointer`() {
         val ctrl = InteractionController()
         assertEquals("dot", ctrl.onHoverMove(layout, 150.0, 60.0)?.id)

@@ -293,6 +293,65 @@ fun runDragTest(): Int {
         }
         println("DRAGTEST OK (resize phase consistent)")
 
+        // ---- S-edge downward phase: grab the SOUTH (bottom-centre) handle and drag straight
+        // down. The top edge (anchor) MUST stay put and the box must grow downward — this is the
+        // exact "resize downward but the box jumps up" report. We also assert the committed
+        // (x,y) so any position shift surfaces directly. ----
+        panel.loadSvg(Samples.SIMPLE)
+        val sCenter = panel.debugElementCenterPx("box-a")!!
+        panel.debugDoubleClick(sCenter.x, sCenter.y) // select box-a
+        val sHx = (24.0 + 50.0 * 2.96).toInt() // S handle x = bottom-centre, svg (50,70)
+        val sHy = (32.4 + 70.0 * 2.96).toInt() // svg y = 70
+        panel.debugPressDrag(sHx, sHy, sHx, sHy + 178) // drag straight down (+178px ~ +60 svg)
+        val midSEdgeImg = capture("midSEdge")
+        panel.debugRelease()
+        val afterSEdgeImg = capture("afterSEdge")
+        val sEdgeBox = panel.layout.byId("box-a")!!
+        val sMid = greenCentroid(midSEdgeImg)
+        val sAfter = greenCentroid(afterSEdgeImg)
+        val sSrc = panel.svgSource
+        val sMatrix = Regex("""id="box-a"[^>]*transform="([^"]*)"""").find(sSrc)
+        println("dragtest[S-down]: box-a transform in source = ${sMatrix?.groupValues?.get(1)}")
+        println("dragtest[S-down]: committed box-a = (${sEdgeBox.x}, ${sEdgeBox.y}, ${sEdgeBox.width}, ${sEdgeBox.height})")
+        println("dragtest[S-down]: box-a green centroid  mid=$sMid  after=$sAfter")
+        if (sMid != null && sAfter != null) {
+            val dpx = kotlin.math.abs(sMid.first - sAfter.first)
+            val dpy = kotlin.math.abs(sMid.second - sAfter.second)
+            println("dragtest[S-down]: mid<->after pixel delta = (${"%.1f".format(dpx)}, ${"%.1f".format(dpy)})")
+            require(dpx < 4 && dpy < 4) { "S-down: element landed at a different pixel than the preview (delta=($dpx,$dpy))" }
+        }
+        require(sEdgeBox.x > 9.0 && sEdgeBox.x < 11.0) { "S-down: box-a x moved (${sEdgeBox.x})" }
+        require(sEdgeBox.y > 9.0 && sEdgeBox.y < 11.0) { "S-down: box-a TOP moved UP/DOWN unexpectedly (y=${sEdgeBox.y})" }
+        require(sEdgeBox.height > 110.0) { "S-down: box-a did not grow downward (h=${sEdgeBox.height})" }
+        println("DRAGTEST OK (S-edge downward: top stays, grows down)")
+
+        // ---- SW-corner downward phase: grab the SOUTH-WEST (bottom-left) handle and drag down.
+        // Regression for a bug where the SW branch froze the height (ht = sb.h) so dragging the
+        // bottom-left handle vertically did nothing. ----
+        panel.loadSvg(Samples.SIMPLE)
+        val swCenter = panel.debugElementCenterPx("box-a")!!
+        panel.debugDoubleClick(swCenter.x, swCenter.y) // select box-a
+        val swHx = (24.0 + 10.0 * 2.96).toInt() // SW handle x = svg (10,70)
+        val swHy = (32.4 + 70.0 * 2.96).toInt()
+        panel.debugPressDrag(swHx, swHy, swHx, swHy + 178) // drag straight down
+        val midSWImg = capture("midSW")
+        panel.debugRelease()
+        val afterSWImg = capture("afterSW")
+        val swBox = panel.layout.byId("box-a")!!
+        val swMid = greenCentroid(midSWImg)
+        val swAfter = greenCentroid(afterSWImg)
+        println("dragtest[SW-down]: committed box-a = (${swBox.x}, ${swBox.y}, ${swBox.width}, ${swBox.height})")
+        println("dragtest[SW-down]: box-a green centroid  mid=$swMid  after=$swAfter")
+        if (swMid != null && swAfter != null) {
+            val dpx = kotlin.math.abs(swMid.first - swAfter.first)
+            val dpy = kotlin.math.abs(swMid.second - swAfter.second)
+            println("dragtest[SW-down]: mid<->after pixel delta = (${"%.1f".format(dpx)}, ${"%.1f".format(dpy)})")
+            require(dpx < 4 && dpy < 4) { "SW-down: element landed at a different pixel than the preview (delta=($dpx,$dpy))" }
+        }
+        require(swBox.height > 110.0) { "SW-down: box-a height did not grow (h=${swBox.height})" }
+        require(swBox.y > 9.0 && swBox.y < 11.0) { "SW-down: box-a TOP moved unexpectedly (y=${swBox.y})" }
+        println("DRAGTEST OK (SW-corner downward: height grows)")
+
         // ---- Nested phase: drag `inner`, which lives inside <g transform="translate(120,80)">.
         // The preview (absolute SVG space) must match the committed, group-aware translate. ----
         panel.loadSvg(Samples.SIMPLE)

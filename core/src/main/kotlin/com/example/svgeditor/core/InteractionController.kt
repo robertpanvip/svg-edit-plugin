@@ -371,20 +371,46 @@ class InteractionController {
             Handle.SW -> {
                 x = sb.x + dx
                 w = sb.w - dx
-                ht = sb.h
+                ht = sb.h + dy
             }
             Handle.W -> {
                 x = sb.x + dx
                 w = sb.w - dx
             }
         }
-        if (w < min) {
-            x = sb.x + sb.w - min
-            w = min
-        }
-        if (ht < min) {
-            y = sb.y + sb.h - min
-            ht = min
+        // Keep the correct anchor edge fixed (not just the bottom-right corner) when the size
+        // would drop below `min`. Each resize handle anchors a different corner/edge, so the
+        // clamp must preserve that specific anchor — otherwise shrinking, say, the S handle past
+        // `min` would flip the box to anchor at its bottom and the top would jump.
+        when (h) {
+            Handle.NW -> { // anchor = SE (right + bottom)
+                if (w < min) { x = sb.x + sb.w - min; w = min }
+                if (ht < min) { y = sb.y + sb.h - min; ht = min }
+            }
+            Handle.N -> { // anchor = bottom edge
+                if (ht < min) { y = sb.y + sb.h - min; ht = min }
+            }
+            Handle.NE -> { // anchor = SW (left + bottom)
+                if (w < min) { x = sb.x; w = min }
+                if (ht < min) { y = sb.y + sb.h - min; ht = min }
+            }
+            Handle.E -> { // anchor = left edge
+                if (w < min) { x = sb.x; w = min }
+            }
+            Handle.SE -> { // anchor = NW (left + top)
+                if (w < min) { x = sb.x; w = min }
+                if (ht < min) { y = sb.y; ht = min }
+            }
+            Handle.S -> { // anchor = top edge
+                if (ht < min) { y = sb.y; ht = min }
+            }
+            Handle.SW -> { // anchor = NE (right + top)
+                if (w < min) { x = sb.x + sb.w - min; w = min }
+                if (ht < min) { y = sb.y; ht = min }
+            }
+            Handle.W -> { // anchor = right edge
+                if (w < min) { x = sb.x + sb.w - min; w = min }
+            }
         }
         return Box(x, y, w, ht)
     }

@@ -666,7 +666,17 @@ class SvgEditorPanel(
         at.rotate(rad)
         at.scale(s, d)
         at.translate(-(ex + sw0 / 2.0), -(ey + sh0 / 2.0))
+        // The committed resvg render is clipped to the SVG viewBox. Without the same clip here,
+        // the live preview can show pixels that resvg will later discard (e.g. a rectangle
+        // resized beyond the canvas bottom), so on release the element appears to "jump up" as
+        // the overhanging part vanishes. Clip the foreground blit to the viewBox bounds so the
+        // preview always matches the committed output.
+        val oldClip = g.clip
+        val vbW = (engine.layout.width * viewScale).toInt().coerceAtLeast(1)
+        val vbH = (engine.layout.height * viewScale).toInt().coerceAtLeast(1)
+        g.clipRect(offsetX.toInt(), offsetY.toInt(), vbW, vbH)
         g.drawImage(fg, at, null)
+        g.clip = oldClip
     }
 
     private fun drawGrid(g: Graphics2D) {
