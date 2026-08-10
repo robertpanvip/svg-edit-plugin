@@ -90,6 +90,9 @@ class InteractionController {
 
     private val handles: List<Handle> = Handle.entries.toList()
     private val snapThreshold = 4.0 // svg units
+    /** Engaged snap targets (absolute svg-unit positions) for hysteresis between frames. */
+    private var snapXTarget: Double? = null
+    private var snapYTarget: Double? = null
 
     /** Pointer moved with no button pressed: refresh hover (+ which handle is under it). */
     fun onHoverMove(
@@ -135,6 +138,8 @@ class InteractionController {
         pointerAngleDeg: Double,
     ) {
         snapLines = emptyList()
+        snapXTarget = null
+        snapYTarget = null
         selectedHandle = null
         editMode = EditMode.ROTATE
         state = State.DRAG
@@ -163,6 +168,8 @@ class InteractionController {
         pointerX = x
         pointerY = y
         snapLines = emptyList()
+        snapXTarget = null
+        snapYTarget = null
         if (selected != null) {
             val h = handleAt(selected!!, x, y, tol)
             if (h != null) {
@@ -224,7 +231,7 @@ class InteractionController {
                 val dx = x - dragStartX
                 val dy = y - dragStartY
                 val raw = Box(sb.x + dx, sb.y + dy, sb.w, sb.h)
-                val (snapped, lines) = applySnap(_layout, sel, raw)
+                val (snapped, lines) = applySnap(_layout, sel, raw, EditMode.MOVE, null)
                 previewBox = snapped
                 snapLines = lines
                 EditResult.Move(sel, snapped.x - sb.x, snapped.y - sb.y)
@@ -233,7 +240,7 @@ class InteractionController {
                 val dx = x - dragStartX
                 val dy = y - dragStartY
                 val raw = computeResize(sb, resizeHandle!!, dx, dy)
-                val (snapped, lines) = applySnap(_layout, sel, raw)
+                val (snapped, lines) = applySnap(_layout, sel, raw, EditMode.RESIZE, resizeHandle)
                 previewBox = snapped
                 snapLines = lines
                 EditResult.Resize(sel, snapped.x, snapped.y, snapped.w, snapped.h)
@@ -383,48 +390,161 @@ class InteractionController {
     }
 
     /**
-     * Snap the box's left/centre/right edges and top/middle/bottom edges to the corresponding
-     * edges of other elements (within [snapThreshold] svg units). Returns the corrected box
-     * plus the guide lines to draw.
+     * Snap the box to other elements' edges (within [snapThreshold] svg units).
+     *
+     * The set of edges that may snap depends on the edit:
+     *  - MOVE: any of the box's left/centre/right and top/middle/bottom edges — the whole box
+     *    translates by the snap delta.
+     *  - RESIZE: ONLY the edge(s) actually being dragged (the opposite corner/side is the
+     *    anchor and must stay fixed). The snap delta is applied to the size on the moving side,
+     *    never as a translation of the whole element — this is what prevents the element from
+     *    "teleporting" while you resize a corner.
+     *
+     * A little hysteresis (a release band of 2×[snapThreshold]) keeps an engaged snap from
+     * flickering on/off at the band boundary, which otherwise reads as a jump.
      */
     private fun applySnap(
         layout: SvgLayout,
         el: SvgElement,
         box: Box,
+        mode: EditMode,
+        handle: Handle?,
     ): Pair<Box, List<SnapLine>> {
         val others = layout.elements.filter { it.id != el.id && it.id.isNotBlank() }
-        if (others.isEmpty()) return box to emptyList()
+        if (others.isEmpty()) {
+            snapXTarget = null
+            snapYTarget = null
+            return box to emptyList()
+        }
 
-        val selX = doubleArrayOf(box.x, box.x + box.w / 2, box.x + box.w)
-        val selY = doubleArrayOf(box.y, box.y + box.h / 2, box.y + box.h)
+        // Which element edges are allowed to move (and therefore may snap) for this edit.
+        val xEdges: List<(Box) -> Double>
+        val yEdges: List<(Box) -> Double>
+        when (mode) {
+            EditMode.MOVE -> {
+                xEdges = listOf({ b -> b.x }, { b -> b.x + b.w / 2 }, { b -> b.x + b.w })
+                yEdges = listOf({ b -> b.y }, { b -> b.y + b.h / 2 }, { b -> b.y + b.h })
+            }
+            EditMode.RESIZE -> {
+                xEdges =
+                    when (handle) {
+                        Handle.NW, Handle.W, Handle.SW -> listOf({ b -> b.x })
+                        Handle.NE, Handle.E, Handle.SE -> listOf({ b -> b.x + b.w })
+                        else -> emptyList()
+                    }
+                yEdges =
+                    when (handle) {
+                        Handle.NW, Handle.N, Handle.NE -> listOf({ b -> b.y })
+                        Handle.SW, Handle.S, Handle.SE -> listOf({ b -> b.y + b.h })
+                        else -> emptyList()
+                    }
+            }
+            else -> {
+                snapXTarget = null
+                snapYTarget = null
+                return box to emptyList()
+            }
+        }
+
+        val release = snapThreshold * 2.0
+
+        // X axis: prefer an already-engaged target while still within the wider release band.
         var bestX = snapThreshold
-        var bestY = snapThreshold
         var lineX: Double? = null
-        var lineY: Double? = null
-        for (o in others) {
-            val ox = doubleArrayOf(o.x, o.x + o.width / 2, o.x + o.width)
-            val oy = doubleArrayOf(o.y, o.y + o.height / 2, o.y + o.height)
-            for (tx in ox) for (sx in selX) {
-                val d = tx - sx
-                if (kotlin.math.abs(d) < kotlin.math.abs(bestX)) {
-                    bestX = d
-                    lineX = tx
+        if (xEdges.isNotEmpty()) {
+            snapXTarget?.let { tgt ->
+                val e = xEdges.first()(box)
+                if (kotlin.math.abs(e - tgt) <= release) {
+                    bestX = tgt - e
+                    lineX = tgt
                 }
             }
-            for (ty in oy) for (sy in selY) {
-                val d = ty - sy
-                if (kotlin.math.abs(d) < kotlin.math.abs(bestY)) {
-                    bestY = d
-                    lineY = ty
+            if (lineX == null) {
+                for (o in others) {
+                    val ox = doubleArrayOf(o.x, o.x + o.width / 2, o.x + o.width)
+                    for (tx in ox) for (sxF in xEdges) {
+                        val d = tx - sxF(box)
+                        if (kotlin.math.abs(d) < kotlin.math.abs(bestX)) {
+                            bestX = d
+                            lineX = tx
+                        }
+                    }
                 }
             }
         }
-        val dx = if (lineX != null) bestX else 0.0
-        val dy = if (lineY != null) bestY else 0.0
-        val newBox = Box(box.x + dx, box.y + dy, box.w, box.h)
+
+        // Y axis.
+        var bestY = snapThreshold
+        var lineY: Double? = null
+        if (yEdges.isNotEmpty()) {
+            snapYTarget?.let { tgt ->
+                val e = yEdges.first()(box)
+                if (kotlin.math.abs(e - tgt) <= release) {
+                    bestY = tgt - e
+                    lineY = tgt
+                }
+            }
+            if (lineY == null) {
+                for (o in others) {
+                    val oy = doubleArrayOf(o.y, o.y + o.height / 2, o.y + o.height)
+                    for (ty in oy) for (syF in yEdges) {
+                        val d = ty - syF(box)
+                        if (kotlin.math.abs(d) < kotlin.math.abs(bestY)) {
+                            bestY = d
+                            lineY = ty
+                        }
+                    }
+                }
+            }
+        }
+
+        snapXTarget = lineX
+        snapYTarget = lineY
+
+        val newBox: Box
+        if (mode == EditMode.MOVE) {
+            val dx = if (lineX != null) bestX else 0.0
+            val dy = if (lineY != null) bestY else 0.0
+            newBox = Box(box.x + dx, box.y + dy, box.w, box.h)
+        } else {
+            // RESIZE: only the moving edge(s) shift; the anchor edge is preserved.
+            var bx = box.x
+            var by = box.y
+            var bw = box.w
+            var bh = box.h
+            if (lineX != null) {
+                when (handle) {
+                    Handle.NW, Handle.W, Handle.SW -> {
+                        bx = box.x + bestX
+                        bw = box.w - bestX
+                    }
+                    Handle.NE, Handle.E, Handle.SE -> {
+                        bw = box.w + bestX
+                    }
+                    else -> {}
+                }
+            }
+            if (lineY != null) {
+                when (handle) {
+                    Handle.NW, Handle.N, Handle.NE -> {
+                        by = box.y + bestY
+                        bh = box.h - bestY
+                    }
+                    Handle.SW, Handle.S, Handle.SE -> {
+                        bh = box.h + bestY
+                    }
+                    else -> {}
+                }
+            }
+            if (bw <= 0.0 || bh <= 0.0) return box to emptyList() // snap would invert the box; skip
+            newBox = Box(bx, by, bw, bh)
+        }
+
         val lines = mutableListOf<SnapLine>()
-        if (lineX != null) lines.add(SnapLine(true, lineX))
-        if (lineY != null) lines.add(SnapLine(false, lineY))
+        val lx = lineX
+        val ly = lineY
+        if (lx != null) lines.add(SnapLine(true, lx))
+        if (ly != null) lines.add(SnapLine(false, ly))
         return newBox to lines
     }
 }

@@ -74,6 +74,24 @@ class InteractionControllerTest {
     }
 
     @Test
+    fun `resize snaps only the dragged edge, keeping the anchor fixed`() {
+        val ctrl = InteractionController()
+        ctrl.onDoubleClick(layout, 50.0, 40.0) // select box-a (10,10,80,60)
+        ctrl.onMousePressed(layout, 90.0, 70.0) // SE handle -> RESIZE (anchor = NW 10,10)
+        // Drag so the bottom edge (raw y = 10 + 60 + dy) approaches inner's top edge (y = 80).
+        // dy = 12 -> raw bottom = 82, within snapThreshold(4) of inner top(80). The bottom edge
+        // should snap to 80, but the NW anchor must stay at (10,10) — no whole-element jump.
+        ctrl.onDragMove(layout, 95.0, 82.0)
+        val res = ctrl.onMouseReleased()
+        assertTrue(res is InteractionController.EditResult.Resize)
+        res as InteractionController.EditResult.Resize
+        assertEquals(10.0, res.x, 1e-9) // anchor x unchanged
+        assertEquals(10.0, res.y, 1e-9) // anchor y unchanged
+        assertEquals(85.0, res.w, 1e-9) // SE moved +5 in x
+        assertEquals(70.0, res.h, 1e-9) // bottom snapped 82 -> 80: 60 + 12 - 2
+    }
+
+    @Test
     fun `hover highlights the element under the pointer`() {
         val ctrl = InteractionController()
         assertEquals("dot", ctrl.onHoverMove(layout, 150.0, 60.0)?.id)
