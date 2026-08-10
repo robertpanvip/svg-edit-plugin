@@ -540,14 +540,17 @@ class SvgEditorPanel(
     // ---- rendering --------------------------------------------------------
 
     private fun renderCanvas(g: Graphics2D) {
-        val wantDrag = interaction.state == InteractionController.State.DRAG &&
-            layerId != null &&
-            fgImage != null
-        if (wantDrag) {
-            // Fast drag path: one 1:1 blit of the pre-baked static composite (background + grid +
-            // base raster with the dragged element hidden) plus the small cropped foreground.
-            if (staticLayer == null || staticDirty || !staticDrag || staticBgColor != background) {
-                staticDrag = true
+        // Use the layered compositing (baked background + cropped foreground) whenever a
+        // selected element has cached layers — both DURING a drag and while it is at rest.
+        // This keeps the rendering representation identical across the drag->release boundary,
+        // so the element never "pops" from the raster preview to a re-rendered offscreen (the
+        // flash + apparent position jump reported at drag end). The foreground crop is simply
+        // re-baked at the committed position on release, and committed == last preview, so it
+        // lands in exactly the same place.
+        val useLayers = layerId != null && fgImage != null
+        if (useLayers) {
+            staticDrag = true // base raster for the layers is the bg layer (element hidden)
+            if (staticLayer == null || staticDirty || staticBgColor != background) {
                 rebuildStaticLayer()
             }
             staticLayer?.let { g.drawImage(it, 0, 0, null) }
@@ -578,11 +581,17 @@ class SvgEditorPanel(
         g: Graphics2D,
         img: BufferedImage,
     ) {
-        val dw = (img.width / dpiScale).toInt().coerceAtLeast(1)
-        val dh = (img.height / dpiScale).toInt().coerceAtLeast(1)
+        // Float placement (no integer truncation) so the committed/offscreen raster is composited
+        // at the exact same sub-pixel position as the drag preview — eliminating the last source
+        // of a systematic "position different" shift at drag end on fractional-DPI displays.
+        val dw = img.width / dpiScale
+        val dh = img.height / dpiScale
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
         g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
-        g.drawImage(img, offsetX.toInt(), offsetY.toInt(), dw, dh, null)
+        val at = java.awt.geom.AffineTransform()
+        at.translate(offsetX, offsetY)
+        at.scale(dw / img.width, dh / img.height)
+        g.drawImage(img, at, null)
     }
 
     /**
@@ -603,11 +612,14 @@ class SvgEditorPanel(
         drawGrid(g2)
         val base = if (staticDrag && bgImage != null) bgImage else offscreen
         if (base != null) {
-            val dw = (base.width / dpiScale).toInt().coerceAtLeast(1)
-            val dh = (base.height / dpiScale).toInt().coerceAtLeast(1)
+            val dw = base.width / dpiScale
+            val dh = base.height / dpiScale
             g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
             g2.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
-            g2.drawImage(base, offsetX.toInt(), offsetY.toInt(), dw, dh, null)
+            val at = java.awt.geom.AffineTransform()
+            at.translate(offsetX, offsetY)
+            at.scale(dw / base.width, dh / base.height)
+            g2.drawImage(base, at, null)
         }
         g2.dispose()
         staticLayer = img
@@ -624,17 +636,20 @@ class SvgEditorPanel(
      */
     private fun drawFg(g: Graphics2D) {
         val fg = fgCrop ?: return
-        val preview = interaction.previewBox ?: return
         val el = engine.layout.byId(layerId!!) ?: return
+        // While dragging, `previewBox` is the live (snapped) box; at rest it is null, so fall
+        // back to the element's committed box. Both are in SVG units.
+        val box = interaction.previewBox
+            ?: InteractionController.Box(el.x, el.y, el.width, el.height)
         val dpr = dpiScale
         val sw0 = el.width * viewScale * dpr
         val sh0 = el.height * viewScale * dpr
         if (sw0 <= 0.0 || sh0 <= 0.0) return
         // Destination box in logical (panel) pixels.
-        val dw = preview.w * viewScale
-        val dh = preview.h * viewScale
-        val dx = offsetX + preview.x * viewScale
-        val dy = offsetY + preview.y * viewScale
+        val dw = box.w * viewScale
+        val dh = box.h * viewScale
+        val dx = offsetX + box.x * viewScale
+        val dy = offsetY + box.y * viewScale
         // Element top-left within the crop, in device pixels.
         val ex = el.x * viewScale * dpr - fgCropX
         val ey = el.y * viewScale * dpr - fgCropY
