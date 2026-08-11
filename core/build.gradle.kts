@@ -16,6 +16,8 @@ dependencies {
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
     testImplementation("org.junit.jupiter:junit-jupiter-params:5.10.2")
+  // Gradle 9 requires JUnit Platform launcher
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 kotlin {
