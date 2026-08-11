@@ -51,10 +51,16 @@ intellijPlatform {
         }
     }
     // Bundle the native resvg bridge next to the plugin classes so JNA can load it.
-    // Adjust the path/extension for your platform (debug vs release, .so/.dylib).
+    // The cargo cdylib filename differs per OS, so pick the right one for the build machine.
+    val osName = System.getProperty("os.name").lowercase()
+    val nativeFileName = when {
+        osName.contains("win") -> "resvg_bridge.dll"
+        osName.contains("mac") || osName.contains("darwin") -> "libresvg_bridge.dylib"
+        else -> "libresvg_bridge.so"
+    }
     val nativeLib =
-        file("../native/resvg_bridge/target/release/resvg_bridge.dll").takeIf { it.exists() }
-            ?: file("../native/resvg_bridge/target/debug/resvg_bridge.dll").takeIf { it.exists() }
+        file("../native/resvg_bridge/target/release/$nativeFileName").takeIf { it.exists() }
+            ?: file("../native/resvg_bridge/target/debug/$nativeFileName").takeIf { it.exists() }
     if (nativeLib != null) {
         project.copy {
             from(nativeLib)
