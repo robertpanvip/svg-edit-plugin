@@ -6,14 +6,15 @@ import com.example.svgeditor.core.Samples
 import com.example.svgeditor.core.SvgEditorEngine
 import com.example.svgeditor.core.SvgEditorPanel
 import com.example.svgeditor.core.SvgRenderer
-import com.formdev.flatlaf.FlatClientProperties
+import com.example.svgeditor.core.TextIconResolver
+import com.example.svgeditor.core.ToolbarActions
+import com.example.svgeditor.core.createEditorToolbar
 import com.formdev.flatlaf.FlatDarculaLaf
 import com.formdev.flatlaf.FlatIntelliJLaf
 import com.formdev.flatlaf.FlatLaf
 import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.Font
-import java.awt.Insets
 import java.awt.RenderingHints
 import java.awt.Toolkit
 import java.awt.datatransfer.DataFlavor
@@ -26,7 +27,6 @@ import java.awt.image.BufferedImage
 import java.io.File
 import javax.imageio.ImageIO
 import javax.swing.BorderFactory
-import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JFileChooser
 import javax.swing.JFrame
@@ -41,7 +41,6 @@ import javax.swing.JScrollPane
 import javax.swing.JSeparator
 import javax.swing.JSplitPane
 import javax.swing.JTextArea
-import javax.swing.JToggleButton
 import javax.swing.JToolBar
 import javax.swing.KeyStroke
 import javax.swing.SwingUtilities
@@ -657,54 +656,16 @@ private fun buildToolBar(
     frame: JFrame,
     sourceArea: JTextArea,
     panel: SvgEditorPanel,
-): JToolBar {
-    fun tbButton(
-        text: String,
-        tooltip: String = text,
-        action: () -> Unit,
-    ): JButton =
-        JButton(text).apply {
-            toolTipText = tooltip
-            isFocusable = false
-            margin = Insets(4, 8, 4, 8)
-            putClientProperty(FlatClientProperties.BUTTON_TYPE, FlatClientProperties.BUTTON_TYPE_TOOLBAR_BUTTON)
-            addActionListener { action() }
-        }
-
-    fun tbToggle(
-        text: String,
-        tooltip: String = text,
-        initial: Boolean,
-        action: (Boolean) -> Unit,
-    ): JToggleButton =
-        JToggleButton(text).apply {
-            toolTipText = tooltip
-            isFocusable = false
-            margin = Insets(4, 8, 4, 8)
-            isSelected = initial
-            putClientProperty(FlatClientProperties.BUTTON_TYPE, FlatClientProperties.BUTTON_TYPE_TOOLBAR_BUTTON)
-            addActionListener { action(isSelected) }
-        }
-
-    return JToolBar().apply {
-        isFloatable = false
-        // FlatLaf constant name differs by version; use the stable property key.
-        putClientProperty("JToolBar.isFlat", true)
-        border = BorderFactory.createMatteBorder(0, 0, 1, 0, UIManager.getColor("Component.borderColor"))
-        add(tbButton("Open", "Open SVG file (Ctrl+O)") { openFile(frame, sourceArea, panel) })
-        add(tbButton("Save", "Save SVG file (Ctrl+S)") { saveFile(frame, sourceArea) })
-        addSeparator(Dimension(8, 0))
-        add(tbButton("-", "Zoom out") { panel.zoomOut() })
-        add(tbButton("+", "Zoom in") { panel.zoomIn() })
-        add(tbButton("100%", "Actual size (100%)") { panel.actualSize() })
-        add(tbButton("Fit", "Fit to window") { panel.fitView() })
-        addSeparator(Dimension(8, 0))
-        add(tbToggle("Grid", "Toggle image-pixel grid", false) { panel.setGrid(it) })
-        add(tbToggle("Chess", "Toggle transparency chessboard", true) { panel.setChessboard(it) })
-        addSeparator(Dimension(8, 0))
-        add(tbButton("Theme", "Toggle IntelliJ Light / Darcula") { toggleTheme() })
-    }
-}
+): JToolBar =
+    createEditorToolbar(
+        panel,
+        TextIconResolver,
+        ToolbarActions(
+            onOpen = { openFile(frame, sourceArea, panel) },
+            onSave = { saveFile(frame, sourceArea) },
+            onToggleTheme = { toggleTheme() },
+        ),
+    )
 
 private var isDarkTheme = false
 
