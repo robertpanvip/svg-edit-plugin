@@ -35,11 +35,13 @@ import javax.swing.JMenu
 import javax.swing.JMenuBar
 import javax.swing.JMenuItem
 import javax.swing.JOptionPane
+import javax.swing.JCheckBoxMenuItem
 import javax.swing.JPanel
 import javax.swing.JScrollPane
 import javax.swing.JSeparator
 import javax.swing.JSplitPane
 import javax.swing.JTextArea
+import javax.swing.JToggleButton
 import javax.swing.JToolBar
 import javax.swing.KeyStroke
 import javax.swing.SwingUtilities
@@ -604,6 +606,13 @@ private fun buildMenuBar(
             if (key != null) accelerator = KeyStroke.getKeyStroke(key, mask)
         }
 
+    fun checkItem(
+        title: String,
+        initial: Boolean,
+        action: (Boolean) -> Unit,
+    ): JCheckBoxMenuItem =
+        JCheckBoxMenuItem(title, initial).apply { addActionListener { action(isSelected) } }
+
     return JMenuBar().apply {
         add(
             menu(
@@ -619,7 +628,11 @@ private fun buildMenuBar(
                 "View",
                 item("Zoom In", KeyEvent.VK_EQUALS) { panel.zoomIn() },
                 item("Zoom Out", KeyEvent.VK_MINUS) { panel.zoomOut() },
+                item("Actual Size", KeyEvent.VK_1) { panel.actualSize() },
                 item("Fit to Window", KeyEvent.VK_0) { panel.fitView() },
+                JSeparator(),
+                checkItem("Show Chessboard", true) { panel.setChessboard(it) },
+                checkItem("Show Grid", false) { panel.setGrid(it) },
                 JSeparator(),
                 item("Toggle Theme") { toggleTheme() },
             ),
@@ -658,6 +671,21 @@ private fun buildToolBar(
             addActionListener { action() }
         }
 
+    fun tbToggle(
+        text: String,
+        tooltip: String = text,
+        initial: Boolean,
+        action: (Boolean) -> Unit,
+    ): JToggleButton =
+        JToggleButton(text).apply {
+            toolTipText = tooltip
+            isFocusable = false
+            margin = Insets(4, 8, 4, 8)
+            isSelected = initial
+            putClientProperty(FlatClientProperties.BUTTON_TYPE, FlatClientProperties.BUTTON_TYPE_TOOLBAR_BUTTON)
+            addActionListener { action(isSelected) }
+        }
+
     return JToolBar().apply {
         isFloatable = false
         // FlatLaf constant name differs by version; use the stable property key.
@@ -666,15 +694,13 @@ private fun buildToolBar(
         add(tbButton("Open", "Open SVG file (Ctrl+O)") { openFile(frame, sourceArea, panel) })
         add(tbButton("Save", "Save SVG file (Ctrl+S)") { saveFile(frame, sourceArea) })
         addSeparator(Dimension(8, 0))
-        add(tbButton("Apply", "Apply source changes") { applySource(sourceArea, panel) })
-        add(tbButton("Sample", "Load sample SVG") {
-            sourceArea.text = Samples.SIMPLE
-            applySource(sourceArea, panel)
-        })
-        addSeparator(Dimension(8, 0))
-        add(tbButton("+", "Zoom in") { panel.zoomIn() })
         add(tbButton("-", "Zoom out") { panel.zoomOut() })
+        add(tbButton("+", "Zoom in") { panel.zoomIn() })
+        add(tbButton("100%", "Actual size (100%)") { panel.actualSize() })
         add(tbButton("Fit", "Fit to window") { panel.fitView() })
+        addSeparator(Dimension(8, 0))
+        add(tbToggle("Grid", "Toggle image-pixel grid", false) { panel.setGrid(it) })
+        add(tbToggle("Chess", "Toggle transparency chessboard", true) { panel.setChessboard(it) })
         addSeparator(Dimension(8, 0))
         add(tbButton("Theme", "Toggle IntelliJ Light / Darcula") { toggleTheme() })
     }
