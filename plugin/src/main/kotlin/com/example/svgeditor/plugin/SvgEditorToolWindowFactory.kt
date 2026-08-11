@@ -1,9 +1,7 @@
 package com.example.svgeditor.plugin
 
-import com.example.svgeditor.core.ResvgBridge
 import com.example.svgeditor.core.Samples
 import com.example.svgeditor.core.SvgEditorPanel
-import com.example.svgeditor.core.SvgRenderer
 import com.example.svgeditor.core.createEditorToolbar
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.ToolWindow
@@ -24,7 +22,7 @@ class SvgEditorToolWindowFactory : ToolWindowFactory {
         project: Project,
         toolWindow: ToolWindow,
     ) {
-        val panel = SvgEditorPanel(loadBridge())
+        val panel = SvgEditorPanel(SvgBridgeLoader.load())
         panel.loadSvg(Samples.SIMPLE)
         val toolbar = createEditorToolbar(panel, IdeaIconResolver)
         val container =
@@ -34,23 +32,5 @@ class SvgEditorToolWindowFactory : ToolWindowFactory {
             }
         val content = ContentFactory.getInstance().createContent(container, "", false)
         toolWindow.contentManager.addContent(content)
-    }
-
-    private fun loadBridge(): SvgRenderer {
-        val candidates =
-            listOf(
-                "resvg_bridge", // bundled on java.library.path
-                "../native/resvg_bridge/target/debug/resvg_bridge",
-                "../native/resvg_bridge/target/release/resvg_bridge",
-            )
-        var last: Throwable? = null
-        for (c in candidates) {
-            try {
-                return ResvgBridge.load(c)
-            } catch (t: Throwable) {
-                last = t
-            }
-        }
-        throw IllegalStateException("Could not load resvg_bridge native library (tried $candidates)", last)
     }
 }
