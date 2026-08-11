@@ -70,6 +70,11 @@ jobs:
           name: native-lib-ubuntu-latest
           path: native/resvg_bridge/target/release/
 
+      # The committed gradlew has no executable bit (the GitHub contents API cannot set one),
+      # so restore it here. Also guards against a truncated wrapper script.
+      - name: Ensure gradlew is executable
+        run: chmod +x gradlew
+
       # NOTE: The Gradle wrapper is committed and pinned to 8.10
       # (see gradle/wrapper/gradle-wrapper.properties). IntelliJ Platform
       # Gradle Plugin 2.1.0 requires Gradle 8.x. Do NOT regenerate the wrapper
