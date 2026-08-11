@@ -1,7 +1,10 @@
 <idea-plugin>
-    <id>com.example.svgeditor</id>
+    <id>com.svgeditor</id>
     <name>SVG Editor</name>
+    <version>0.1.0</version>
     <vendor email="dev@example.com" url="https://example.com">example</vendor>
+    <description>SVG editor with an interactive design canvas (move / resize / rotate) alongside the
+        source text. Opens as a tab next to the built-in SVG image viewer.</description>
 
     <depends>com.intellij.modules.platform</depends>
 
@@ -9,5 +12,17 @@
         <toolWindow id="SVG Editor"
                     anchor="right"
                     factoryClass="com.example.svgeditor.plugin.SvgEditorToolWindowFactory"/>
+        <fileEditorProvider implementation="com.example.svgeditor.plugin.SvgEditorProvider"
+                            order="last"/>
     </extensions>
+
+    <actions>
+        <action id="SvgEasy.OpenInDesigner"
+                class="com.example.svgeditor.plugin.OpenInSvgEasyAction"
+                text="Open in SvgEasy Designer"
+                description="Open the SVG file in the SvgEasy text + design-canvas editor">
+            <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
 </idea-plugin>
