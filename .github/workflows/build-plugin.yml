@@ -63,19 +63,19 @@ jobs:
           cache: gradle
 
 
-      # 下载 Linux native
+      # Download Linux native lib produced by the build-native job above.
       - name: Download native artifacts
         uses: actions/download-artifact@v4
         with:
           name: native-lib-ubuntu-latest
           path: native/resvg_bridge/target/release/
-          
-      # Pin the Gradle wrapper to 8.10: `gradle wrapper` with no version would pick the runner's
-      # system Gradle (9.x), which is incompatible with IntelliJ Platform Gradle Plugin 2.1.0
-      # (requires Gradle 8.x). 8.10 is the version verified to build this plugin end-to-end.
-      - name: Create Gradle wrapper
-        run: gradle wrapper --gradle-version 8.10
 
+      # NOTE: The Gradle wrapper is committed and pinned to 8.10
+      # (see gradle/wrapper/gradle-wrapper.properties). IntelliJ Platform
+      # Gradle Plugin 2.1.0 requires Gradle 8.x. Do NOT regenerate the wrapper
+      # with the runner's system Gradle (9.x) here: configuring the project
+      # under Gradle 9 fails with "Method call not allowed" in plugin/build.gradle.kts,
+      # so the wrapper task never runs and ./gradlew falls back to a 9.x distribution.
       - name: Build plugin
         run: ./gradlew :plugin:buildPlugin
 
@@ -105,7 +105,7 @@ jobs:
           name: plugin-artifacts
           path: artifacts
 
-      # 获取 tag
+      # Resolve the release tag.
       - name: Get tag
         id: tag
         shell: bash
@@ -115,7 +115,7 @@ jobs:
           else
             echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
           fi
-          
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
