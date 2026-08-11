@@ -68,7 +68,9 @@ jobs:
         with:
           name: native-lib-ubuntu-latest
           path: native/resvg_bridge/target/release/
-
+          
+      - name: Create Gradle wrapper
+        run: gradle wrapper
 
       - name: Build plugin
         run: ./gradlew :plugin:buildPlugin
