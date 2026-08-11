@@ -8,6 +8,7 @@ import java.awt.Graphics
 import java.awt.Graphics2D
 import java.awt.Point
 import java.awt.RenderingHints
+import java.awt.TexturePaint
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.awt.event.MouseAdapter
@@ -77,6 +78,12 @@ class SvgEditorPanel(
 
     private var hoveredId: String? = null
     private var selectedId: String? = null
+
+    /** Transparency chessboard (IDEA-style) drawn behind the image. On by default. */
+    private var chessboardEnabled = true
+
+    /** Image-pixel grid (IDEA-style), shown only at >=100%. Off by default. */
+    private var gridEnabled = false
     private val pointer = Point(0, 0)
 
     /** Status callback (zoom % + selection) for the host application. */
@@ -87,7 +94,15 @@ class SvgEditorPanel(
         private val ROTATE_OFFSET = 22 // px above the box top
         private val ROTATE_R = 5 // rotate handle radius
         private val HANDLE = 8 // control point size
-        private val GRID_STEP = 24 // px
+
+        // --- Transparency chessboard (mirrors IDEA ImageComponent defaults) ---
+        private const val CHESS_CELL = 8 // px per half-cell on screen
+        private val CHESS_WHITE = Color.WHITE
+        private val CHESS_GRAY = Color(0xCC, 0xCC, 0xCC) // 204,204,204
+
+        // --- Image-pixel grid (mirrors IDEA ImageComponent grid) ---
+        private const val GRID_SPAN = 10 // image px between grid lines
+        private const val GRID_ZOOM_MIN = 1.0 // show grid only at >=100% (1 svg unit == 1 px)
     }
 
     private val canvas =
@@ -147,6 +162,40 @@ class SvgEditorPanel(
     fun zoomIn() = zoomBy(1.2)
 
     fun zoomOut() = zoomBy(1.0 / 1.2)
+
+    /** Zoom to 100%: 1 SVG user unit == 1 screen px (IDEA "Actual Size"). */
+    fun actualSize() {
+        val w = engine.layout.width
+        val h = engine.layout.height
+        if (w <= 0 || h <= 0) return
+        val cw = canvas.width.takeIf { it > 0 } ?: 640
+        val ch = canvas.height.takeIf { it > 0 } ?: 420
+        val fit = ((cw - 2 * pad) / w).coerceAtMost((ch - 2 * pad) / h).coerceAtLeast(0.01)
+        zoom = (1.0 / fit).coerceIn(0.1, 16.0)
+        recomputeView()
+        renderAtDeviceSize()
+        canvas.repaint()
+        emitStatus()
+    }
+
+    /** Current zoom as a percentage relative to actual size (100% = 1 svg unit == 1 px). */
+    fun getZoomPercent(): Int = (viewScale * 100).toInt()
+
+    fun setChessboard(on: Boolean) {
+        chessboardEnabled = on
+        staticDirty = true
+        canvas.repaint()
+    }
+
+    fun isChessboard(): Boolean = chessboardEnabled
+
+    fun setGrid(on: Boolean) {
+        gridEnabled = on
+        staticDirty = true
+        canvas.repaint()
+    }
+
+    fun isGrid(): Boolean = gridEnabled
 
     /** Reset zoom to 100% of the fit view. */
     fun fitView() {
@@ -534,7 +583,7 @@ class SvgEditorPanel(
 
     private fun emitStatus() {
         val sel = selectedId?.let { "Selected: $it" } ?: "No selection"
-        onStatus?.invoke("Zoom: ${(zoom * 100).toInt()}% · $sel")
+        onStatus?.invoke("Zoom: ${getZoomPercent()}% · $sel")
     }
 
     // ---- rendering --------------------------------------------------------
@@ -564,9 +613,8 @@ class SvgEditorPanel(
             // Java2D colour-management conversions that shift exact pixel values and break the
             // headless pixel-consistency checks. Drag frames are unaffected because the dragged
             // element is supplied by `fgCrop`, not by the base raster.
-            g.color = background
-            g.fillRect(0, 0, width, height)
-            drawGrid(g)
+            paintBackground(g)
+            if (gridEnabled) drawGrid(g)
             offscreen?.let { drawScaled(g, it) }
             staticDirty = true // ensure the next drag re-bakes with the current base raster
         }
@@ -607,9 +655,8 @@ class SvgEditorPanel(
         }
         val img = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
         val g2 = img.createGraphics()
-        g2.color = background
-        g2.fillRect(0, 0, width, height)
-        drawGrid(g2)
+        paintBackground(g2)
+        if (gridEnabled) drawGrid(g2)
         val base = if (staticDrag && bgImage != null) bgImage else offscreen
         if (base != null) {
             val dw = base.width / dpiScale
@@ -679,22 +726,79 @@ class SvgEditorPanel(
         g.clip = oldClip
     }
 
+    /** Fill the panel background; paint the IDEA-style transparency chessboard when enabled. */
+    private fun paintBackground(g: Graphics2D) {
+        g.color = background
+        g.fillRect(0, 0, width, height)
+        if (chessboardEnabled) drawChessboard(g)
+    }
+
+    /**
+     * Paint the IDEA-style transparency checkerboard behind the image. Uses a [TexturePaint]
+     * tile (white with two grey squares) anchored at the image origin so the pattern pans with
+     * the canvas — exactly how `org.intellij.images.ui.ImageComponentUI` visualises alpha.
+     */
+    private fun drawChessboard(g: Graphics2D) {
+        val w = engine.layout.width
+        val h = engine.layout.height
+        if (w <= 0 || h <= 0) return
+        val cell = CHESS_CELL.toDouble()
+        val tile = BufferedImage(2 * CHESS_CELL, 2 * CHESS_CELL, BufferedImage.TYPE_INT_RGB)
+        val tg = tile.createGraphics()
+        tg.color = CHESS_WHITE
+        tg.fillRect(0, 0, tile.width, tile.height)
+        tg.color = CHESS_GRAY
+        tg.fillRect(cell.toInt(), 0, cell.toInt(), cell.toInt())
+        tg.fillRect(0, cell.toInt(), cell.toInt(), cell.toInt())
+        tg.dispose()
+        val ax = offsetX
+        val ay = offsetY
+        val texture =
+            TexturePaint(
+                tile,
+                java.awt.geom.Rectangle2D.Double(ax, ay, tile.width.toDouble(), tile.height.toDouble()),
+            )
+        val old = g.paint
+        g.paint = texture
+        g.fillRect(ax.toInt(), ay.toInt(), (w * viewScale).toInt(), (h * viewScale).toInt())
+        g.paint = old
+    }
+
+    /**
+     * IDEA-aligned image-pixel grid: a line every [GRID_SPAN] image (SVG) pixels, drawn only when
+     * zoomed in enough that 1 image px >= 1 screen px ([GRID_ZOOM_MIN]). Lines are scoped to the
+     * image bounds (IDEA draws the grid over the image, not the whole viewport).
+     */
     private fun drawGrid(g: Graphics2D) {
+        val w = engine.layout.width
+        val h = engine.layout.height
+        if (w <= 0 || h <= 0) return
+        if (viewScale < GRID_ZOOM_MIN) return
+        val step = GRID_SPAN * viewScale
+        if (step < 3) return
         val bg = background
         val lum = 0.299 * bg.red + 0.587 * bg.green + 0.114 * bg.blue
         g.color = if (lum > 140) Color(0xE2, 0xE2, 0xE8) else Color(0x2C, 0x2C, 0x34)
         g.stroke = BasicStroke(1f)
-        val startX = offsetX.toInt() % GRID_STEP
-        val startY = offsetY.toInt() % GRID_STEP
-        var x = startX
-        while (x < width) {
-            g.drawLine(x, 0, x, height)
-            x += GRID_STEP
+        val left = offsetX
+        val top = offsetY
+        val right = left + w * viewScale
+        val bottom = top + h * viewScale
+        var i = 0
+        var x = left
+        while (x <= right) {
+            val lx = x.toInt()
+            g.drawLine(lx, top.toInt(), lx, bottom.toInt())
+            i++
+            x = left + i * step
         }
-        var y = startY
-        while (y < height) {
-            g.drawLine(0, y, width, y)
-            y += GRID_STEP
+        i = 0
+        var y = top
+        while (y <= bottom) {
+            val ly = y.toInt()
+            g.drawLine(left.toInt(), ly, right.toInt(), ly)
+            i++
+            y = top + i * step
         }
     }
 
