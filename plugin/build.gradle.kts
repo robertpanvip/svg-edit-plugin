@@ -9,12 +9,10 @@ version = "0.1.0"
 repositories {
     mavenCentral()
     intellijPlatform {
-        marketplace()
-        // IDE installer Ivy repo (https://download.jetbrains.com) — required to resolve
-        // `idea:ideaIC:<version>` produced by `intellijIdeaCommunity(...)`. Without it Gradle
-        // only looks in mavenCentral/marketplace and fails to find the SDK tarball.
-        jetbrainsIdeInstallers()
-        releases()
+        // Recommended default repo set (mavenCentral + jetbrainsIdeInstallers + marketplace + ...).
+        defaultRepositories()
+        // JetBrains dependencies repo (asm-all etc.) required by instrumentationTools().
+        intellijDependencies()
     }
 }
 
@@ -26,6 +24,10 @@ dependencies {
         // NOTE: in IntelliJ Platform Gradle Plugin 2.1.0 the dependency function is named
         // `intellijIdeaCommunity` (later versions renamed it to `ideaCommunity`).
         intellijIdeaCommunity("2023.2.5")
+        // Required by the `instrumentCode` step (verifyPlugin / build) for bytecode instrumentation.
+        instrumentationTools()
+        // Plugin verifier (used by the `verifyPlugin` task to check compatibility against IDE builds).
+        pluginVerifier()
     }
 }
 
@@ -35,12 +37,17 @@ kotlin {
 
 intellijPlatform {
     pluginConfiguration {
-        id = "com.example.svgeditor"
+        id = "com.svgeditor"
         name = "SVG Editor"
         version = project.version as String
         vendor {
             name = "example"
             email = "dev@example.com"
+        }
+    }
+    pluginVerification {
+        ides {
+            ide("2023.2.5")
         }
     }
     // Bundle the native resvg bridge next to the plugin classes so JNA can load it.
