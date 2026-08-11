@@ -70,16 +70,17 @@ jobs:
           name: native-lib-ubuntu-latest
           path: native/resvg_bridge/target/release/
           
+      # Pin the Gradle wrapper to 8.10: `gradle wrapper` with no version would pick the runner's
+      # system Gradle (9.x), which is incompatible with IntelliJ Platform Gradle Plugin 2.1.0
+      # (requires Gradle 8.x). 8.10 is the version verified to build this plugin end-to-end.
       - name: Create Gradle wrapper
-        run: gradle wrapper
+        run: gradle wrapper --gradle-version 8.10
 
       - name: Build plugin
         run: ./gradlew :plugin:buildPlugin
 
-
       - name: Run tests
         run: ./gradlew test
-
 
       - name: Upload plugin artifacts
         uses: actions/upload-artifact@v4
