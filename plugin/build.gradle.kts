@@ -22,6 +22,11 @@ dependencies {
         // IntelliJ IDEA Community 2023.2.5
         intellijIdeaCommunity("2023.2.5")
     }
+
+    testImplementation(kotlin("test"))
+
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
 kotlin {
