@@ -89,6 +89,13 @@ class SvgEditorPanel(
     /** Status callback (zoom % + selection) for the host application. */
     var onStatus: ((String) -> Unit)? = null
 
+    /**
+     * Fired after an interactive edit (move / resize / rotate) is committed to the SVG model.
+     * Hosts that bind the panel to a document (e.g. the IntelliJ editor) use this to write the
+     * updated [svgSource] back. Not invoked for plain re-renders or selection changes.
+     */
+    var onEdit: (() -> Unit)? = null
+
     companion object {
         private val ACCENT = Color(0x32, 0xCD, 0x79) // Leafier green
         private val ROTATE_OFFSET = 22 // px above the box top
@@ -478,7 +485,8 @@ class SvgEditorPanel(
     }
 
     private fun handleRelease() {
-        when (val res = interaction.onMouseReleased()) {
+        val res = interaction.onMouseReleased()
+        when (res) {
             is InteractionController.EditResult.Move -> {
                 engine.moveElement(res.element.id, res.dx, res.dy)
                 offscreen = decode(engine.png)
@@ -499,6 +507,7 @@ class SvgEditorPanel(
             }
             null -> {}
         }
+        if (res != null) onEdit?.invoke()
         staticDirty = true // offscreen / selection changed; re-bake the static composite
         canvas.repaint()
         emitStatus()
