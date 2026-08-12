@@ -68,3 +68,9 @@ intellijPlatform {
         }
     }
 }
+
+// Rename the distributable zip. By default its base name is the Gradle subproject
+// name ("plugin"), giving "plugin-<version>.zip". Override it to something meaningful.
+tasks.named<org.gradle.api.tasks.bundling.AbstractArchiveTask>("buildPlugin") {
+    archiveBaseName.set("svg-editor-plugin")
+}
