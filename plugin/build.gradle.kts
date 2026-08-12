@@ -67,14 +67,22 @@ intellijPlatform {
         osName.contains("mac") || osName.contains("darwin") -> "libresvg_bridge.dylib"
         else -> "libresvg_bridge.so"
     }
-    val nativeLib =
-        file("../native/resvg_bridge/target/release/$nativeFileName").takeIf { it.exists() }
-            ?: file("../native/resvg_bridge/target/debug/$nativeFileName").takeIf { it.exists() }
+    // cargo on Windows places the cdylib under target/{release,debug}/deps/; on other
+    // platforms it may sit directly under target/{release,debug}/. Search both layouts.
+    val nativeBase = file("../native/resvg_bridge/target")
+    val nativeLib = listOf("release", "debug").firstNotNullOfOrNull { cfg ->
+        listOf("", "deps/").firstNotNullOfOrNull { sub ->
+            file("$nativeBase/$cfg/$sub$nativeFileName").takeIf { it.exists() }
+        }
+    }
     if (nativeLib != null) {
         project.copy {
             from(nativeLib)
             into(layout.buildDirectory.dir("resources/main"))
         }
+        println("Bundled native lib: ${nativeLib.absolutePath}")
+    } else {
+        println("WARNING: native lib '$nativeFileName' not found under $nativeBase; the plugin will fail to load resvg at runtime")
     }
 }
 
