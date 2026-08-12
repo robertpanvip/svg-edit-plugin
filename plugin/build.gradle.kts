@@ -45,13 +45,13 @@ intellijPlatform {
             email = "dev@example.com"
         }
         // Compatibility range. The plugin is compiled against IDEA 2023.2.5 (build 232) but must
-        // also install on newer IDEs such as WebStorm 2026.2 (build WS-262.*). IJP otherwise
-        // auto-derives `untilBuild="232.*"` from the SDK, which blocks install on 262. Override it
-        // here. Bump `untilBuild` (or set it to `provider { null }` for no upper bound) when
-        // targeting a newer IDE major.
+        // also install on newer IDEs. IJP otherwise auto-derives `untilBuild="232.*"` from the SDK,
+        // which blocks install on newer builds. `provider { null }` removes the upper bound entirely
+        // so the plugin installs on any current/future IDE — at the cost of potential silent breakage
+        // if a future IDE removes an API we use. Bump/`sinceBuild` guard if that happens.
         ideaVersion {
             sinceBuild = "232"
-            untilBuild = "262.*"
+            untilBuild = provider { null }
         }
     }
     pluginVerification {
