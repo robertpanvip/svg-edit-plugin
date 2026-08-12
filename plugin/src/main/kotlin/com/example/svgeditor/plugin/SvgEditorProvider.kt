@@ -3,6 +3,7 @@ package com.example.svgeditor.plugin
 import com.intellij.openapi.fileEditor.FileEditor
 import com.intellij.openapi.fileEditor.FileEditorPolicy
 import com.intellij.openapi.fileEditor.FileEditorProvider
+import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 
@@ -14,7 +15,7 @@ import com.intellij.openapi.vfs.VirtualFile
  * To make SvgEasy the *default* `.svg` editor instead (replacing the image viewer), change the
  * registration to `order="first"`.
  */
-class SvgEditorProvider : FileEditorProvider {
+class SvgEditorProvider : FileEditorProvider, DumbAware {
     override fun accept(
         project: Project,
         file: VirtualFile,
