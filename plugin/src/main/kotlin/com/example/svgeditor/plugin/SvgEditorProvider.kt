@@ -23,10 +23,16 @@ class SvgEditorProvider : FileEditorProvider, DumbAware {
         file: VirtualFile,
     ): Boolean = file.extension.equals("svg", ignoreCase = true)
 
+    /** Never throws: even a failing [SvgPreviewEditor] degrades to a visible error tab. */
     override fun createEditor(
         project: Project,
         file: VirtualFile,
-    ): FileEditor = SvgPreviewEditor(project, file)
+    ): FileEditor =
+        try {
+            SvgPreviewEditor(project, file)
+        } catch (t: Throwable) {
+            SvgEasyFallbackPanel(t)
+        }
 
     override fun getEditorTypeId(): String = "SvgEasy.text.editor"
 

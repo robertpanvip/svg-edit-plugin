@@ -2,7 +2,6 @@ package com.example.svgeditor.plugin
 
 import com.example.svgeditor.core.SvgEditorPanel
 import com.example.svgeditor.core.SvgRenderer
-import com.example.svgeditor.core.createEditorToolbar
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.event.DocumentEvent
@@ -63,7 +62,7 @@ class SvgPreviewPanel(
             }
         }
 
-    private val toolbar: JComponent? = panel?.let { createEditorToolbar(it, IdeaIconResolver) }
+    private val toolbar: JComponent? = panel?.let { SvgEasyToolbar.forPanel(it) }
 
     private val documentListener =
         object : DocumentListener {

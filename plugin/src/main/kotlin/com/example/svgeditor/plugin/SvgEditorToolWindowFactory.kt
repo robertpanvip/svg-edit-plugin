@@ -2,7 +2,6 @@ package com.example.svgeditor.plugin
 
 import com.example.svgeditor.core.Samples
 import com.example.svgeditor.core.SvgEditorPanel
-import com.example.svgeditor.core.createEditorToolbar
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
@@ -38,8 +37,8 @@ import javax.swing.SwingConstants
  * a [Disposable] releases it (and the message bus connection) when the tool window content is
  * disposed.
  *
- * The toolbar reuses the same [createEditorToolbar] builder as the standalone app, but resolves
- * icons through [IdeaIconResolver] (official IntelliJ `AllIcons`) so it matches the IDEA look.
+ * The toolbar is a native platform `ActionToolbar` (see [SvgEasyToolbar]) driven by the same
+ * `AllIcons` actions as the built-in image viewer, so it matches the IDEA look exactly.
  */
 class SvgEditorToolWindowFactory : ToolWindowFactory {
     override fun createToolWindowContent(
@@ -53,7 +52,7 @@ class SvgEditorToolWindowFactory : ToolWindowFactory {
             if (renderer != null) {
                 val editorPanel = SvgEditorPanel(renderer, asyncRendering = true)
                 panel = editorPanel
-                val toolbar = createEditorToolbar(editorPanel, IdeaIconResolver)
+                val toolbar = SvgEasyToolbar.forPanel(editorPanel)
                 val editorView =
                     JPanel(BorderLayout()).apply {
                         add(toolbar, BorderLayout.NORTH)
