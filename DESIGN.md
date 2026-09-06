@@ -217,6 +217,12 @@ cd native/resvg_bridge
 cargo test            # 编译 + 跑 Rust 测试
 cargo build --release # 产出 target/release/resvg_bridge.dll
 
+# 1b) 跨平台插件 zip：在 Linux 上交叉编译 Windows dll（需 mingw-w64：
+#     apt install gcc-mingw-w64-x86-64），`:plugin:buildPlugin` 会把它
+#     与 .so 一起打进插件 jar，一个 zip 通吃 Windows/Linux
+RUSTFLAGS="-C target-feature=+crt-static" \
+  cargo build --release --target x86_64-pc-windows-gnu # 产出 target/x86_64-pc-windows-gnu/release/resvg_bridge.dll
+
 # 2) Kotlin 单测（无需 IDEA SDK）
 ./gradlew :core:test  # 纯逻辑 + 面板（FakeSvgRenderer）
 

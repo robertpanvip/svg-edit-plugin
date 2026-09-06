@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.example.svgeditor"
-version = "0.1.0"
+version = "0.2.0"
 
 repositories {
     mavenCentral()
@@ -59,30 +59,48 @@ intellijPlatform {
             ide("2023.2.5")
         }
     }
-    // Bundle the native resvg bridge next to the plugin classes so JNA can load it.
-    // The cargo cdylib filename differs per OS, so pick the right one for the build machine.
-    val osName = System.getProperty("os.name").lowercase()
-    val nativeFileName = when {
-        osName.contains("win") -> "resvg_bridge.dll"
-        osName.contains("mac") || osName.contains("darwin") -> "libresvg_bridge.dylib"
-        else -> "libresvg_bridge.so"
-    }
-    // cargo on Windows places the cdylib under target/{release,debug}/deps/; on other
-    // platforms it may sit directly under target/{release,debug}/. Search both layouts.
+    // Bundle the native resvg bridges for EVERY platform we have a build for, so one plugin
+    // zip installs on any OS — SvgBridgeLoader picks the right file name for the runtime OS
+    // (resvg_bridge.dll / libresvg_bridge.dylib / libresvg_bridge.so). The Windows dll is
+    // cross-built on Linux via `cargo build --release --target x86_64-pc-windows-gnu`
+    // (RUSTFLAGS="-C target-feature=+crt-static" keeps it self-contained). macOS has no
+    // cross build here; its users can drop a locally built dylib into <IDE config>/svg-editor/.
     val nativeBase = file("../native/resvg_bridge/target")
-    val nativeLib = listOf("release", "debug").firstNotNullOfOrNull { cfg ->
-        listOf("", "deps/").firstNotNullOfOrNull { sub ->
-            file("$nativeBase/$cfg/$sub$nativeFileName").takeIf { it.exists() }
+    // cargo places the cdylib under target/<triple>/release when built with --target,
+    // else under target/{release,debug}[/{deps}/]. Search all layouts.
+    val nativeCandidates =
+        mapOf(
+            "resvg_bridge.dll" to
+                listOf(
+                    "x86_64-pc-windows-gnu/release",
+                    "x86_64-pc-windows-gnu/release/deps",
+                    "release",
+                    "debug",
+                    "release/deps",
+                    "debug/deps",
+                ),
+            "libresvg_bridge.dylib" to listOf("release", "debug", "release/deps", "debug/deps"),
+            "libresvg_bridge.so" to listOf("release", "debug", "release/deps", "debug/deps"),
+        )
+    var bundledAny = false
+    for ((fileName, searchPaths) in nativeCandidates) {
+        val lib =
+            searchPaths.firstNotNullOfOrNull { sub ->
+                file("$nativeBase/$sub/$fileName").takeIf { it.exists() }
+            }
+        if (lib != null) {
+            project.copy {
+                from(lib)
+                into(layout.buildDirectory.dir("resources/main"))
+            }
+            println("Bundled native lib: ${lib.absolutePath}")
+            bundledAny = true
+        } else {
+            println("NOTE: native lib '$fileName' not found under $nativeBase (skipped)")
         }
     }
-    if (nativeLib != null) {
-        project.copy {
-            from(nativeLib)
-            into(layout.buildDirectory.dir("resources/main"))
-        }
-        println("Bundled native lib: ${nativeLib.absolutePath}")
-    } else {
-        println("WARNING: native lib '$nativeFileName' not found under $nativeBase; the plugin will fail to load resvg at runtime")
+    if (!bundledAny) {
+        throw GradleException("No native resvg bridge found under $nativeBase — build it first (cargo build --release)")
     }
 }
 
