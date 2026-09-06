@@ -8,9 +8,11 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 
 /**
- * Makes [SvgPreviewEditor] available for `.svg` files. Registered with `order="last"` so the
- * built-in IDEA SVG image viewer stays the default tab on open, while SvgEasy coexists as an
- * additional tab (it is not forced to replace the image viewer).
+ * Makes [SvgPreviewEditor] available for `.svg` files. Registered with `order="last"` and
+ * [FileEditorPolicy.PLACE_AFTER_DEFAULT_EDITOR], so opening an `.svg` file keeps the built-in
+ * IDEA image viewer as the first tab and adds SvgEasy (text + design canvas) as a second tab
+ * the user can click to switch to — mirroring the coexistence approach of SvgEazy
+ * (`PLACE_BEFORE_DEFAULT_EDITOR` there, after here so the original viewer stays first).
  *
  * To make SvgEasy the *default* `.svg` editor instead (replacing the image viewer), change the
  * registration to `order="first"`.
@@ -28,5 +30,5 @@ class SvgEditorProvider : FileEditorProvider, DumbAware {
 
     override fun getEditorTypeId(): String = "SvgEasy.text.editor"
 
-    override fun getPolicy(): FileEditorPolicy = FileEditorPolicy.HIDE_DEFAULT_EDITOR
+    override fun getPolicy(): FileEditorPolicy = FileEditorPolicy.PLACE_AFTER_DEFAULT_EDITOR
 }
