@@ -1,67 +1,101 @@
 package com.example.svgeditor.core
 
 import java.awt.BasicStroke
+import java.awt.BorderLayout
 import java.awt.Color
 import java.awt.Cursor
 import java.awt.Dimension
 import java.awt.Graphics
 import java.awt.Graphics2D
 import java.awt.Point
+import java.awt.Rectangle
 import java.awt.RenderingHints
 import java.awt.TexturePaint
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
+import java.awt.event.KeyAdapter
+import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.event.MouseMotionAdapter
 import java.awt.event.MouseWheelEvent
-import java.awt.event.MouseWheelListener
+import java.awt.geom.AffineTransform
+import java.awt.geom.Ellipse2D
+import java.awt.geom.Line2D
+import java.awt.geom.Path2D
+import java.awt.geom.Rectangle2D
+import java.awt.geom.RoundRectangle2D
 import java.awt.image.BufferedImage
-import javax.imageio.ImageIO
+import java.util.concurrent.Executors
 import javax.swing.JPanel
 import javax.swing.JScrollPane
+import javax.swing.SwingUtilities
+import javax.swing.Timer
 
 /**
- * The SVG editor panel.
+ * The SVG editor panel — a LeaferJS-style canvas surface.
  *
- * Pipeline:
- *  1. `resvg` renders the SVG into an off-screen [BufferedImage] (the "off-screen canvas").
- *     The image is rendered at the panel's **true device resolution** (`svgSize × viewScale
- *     × DPI`), so it is composited 1:1 on screen — no upscaling blur / aliasing.
- *  2. The same render produces an [SvgLayout] (per-element absolute bounding boxes).
- *  3. A [MouseMotionListener] tracks the pointer; we convert pointer pixels to SVG/canvas
- *     coordinates and run [CollisionDetector] to find the element under the cursor.
- *  4. Interaction: click / double-click selects an element and shows a Leafier-style edit box
- *     (thin accent outline, 8 control points, a rotate handle above). Dragging the body moves
- *     it, dragging a handle resizes it.
+ * Rendering pipeline (async mode):
+ *  1. The panel owns ALL raster production. Rasters are produced as raw premultiplied
+ *     RGBA ([SvgRenderer.renderRgba]) on a single background thread and packed into
+ *     `TYPE_INT_ARGB_PRE` images — no PNG encode/decode round-trips on any path.
+ *  2. A [RenderScheduler] (latest-wins, CONTENT beats LAYERS) feeds results back on the EDT,
+ *     guarded by staleness tags (a reference to the exact `svgSource` string + device size),
+ *     so a slow render for an outdated view is never painted.
+ *  3. Wheel zoom / window resize only resample the existing bitmap for instant feedback;
+ *     a 160 ms debounce timer then re-renders once at the new device resolution.
+ *  4. Hovering an element pre-heats its drag layers (background / foreground) after 120 ms,
+ *     so the first drag frame is already warm — press-and-drag never blocks.
  *
- * Smooth dragging: when an element is selected we build TWO cached rasters — a background
- * layer (everything except the selected element) and a foreground layer (only the selected
- * element). During a drag we blit the static background and offset/scale the foreground with a
- * plain drawImage — zero resvg calls — so the element follows the cursor at 60fps instead of
- * only a yellow preview box moving. The edit is committed (and the whole SVG re-rasterized)
- * once on release.
+ * Editing commits ([InteractionController] preview -> [SvgEditorEngine] edit) re-parse the
+ * LAYOUT only; the raster refresh is scheduled through the same background pipeline.
+ *
+ * Interaction model:
+ *  - hover highlight, click to select, LeaferJS-style accent frame with round handles + rotate grip
+ *  - drag body = move, drag handle = resize, drag rotate grip = rotate (with snapping)
+ *  - marquee selection on empty canvas (rubber-band, topmost element wins)
+ *  - space / middle-mouse pans the scroll viewport, wheel zooms around the cursor
+ *
+ * Sync mode ([asyncRendering] = false, used by unit tests) performs every render inline so
+ * behavior is fully deterministic — the interaction logic is shared by both modes.
  *
  * The class depends only on Swing + [SvgRenderer], so it is fully unit-testable with a fake
  * renderer (no IntelliJ SDK, no Rust toolchain required).
  */
 class SvgEditorPanel(
-    renderer: SvgRenderer,
+    private val renderer: SvgRenderer,
+    asyncRendering: Boolean = false,
 ) : JPanel() {
     private val engine = SvgEditorEngine(renderer)
     private val interaction = InteractionController()
 
-    /** Off-screen canvas: the resvg render, composited onto the visible panel. */
+    /** Single background producer for all rasters; null = synchronous test mode. */
+    private val scheduler: RenderScheduler? =
+        if (asyncRendering) {
+            RenderScheduler(
+                Executors.newSingleThreadExecutor { r ->
+                    Thread(r, "svg-editor-render").apply { isDaemon = true }
+                },
+            )
+        } else {
+            null
+        }
+
+    /** Off-screen canvas: the full SVG render at device resolution. */
     private var offscreen: BufferedImage? = null
 
-    /** Drag layers (only populated while an element is selected). */
+    /** Drag layers: background (element hidden) + foreground (element solo), device-sized. */
     private var bgImage: BufferedImage? = null
     private var fgImage: BufferedImage? = null
+
     /** Foreground cropped to the element's bounding box (+rotation padding) for a cheap blit. */
     private var fgCrop: BufferedImage? = null
     private var fgCropX = 0.0
     private var fgCropY = 0.0
     private var layerId: String? = null
+
+    /** The layer request the panel is currently waiting for (staleness guard). */
+    private var wantedLayer: LayerTag? = null
 
     /** Static composite (background + grid + base raster) baked once per view/selection change. */
     private var staticLayer: BufferedImage? = null
@@ -77,40 +111,43 @@ class SvgEditorPanel(
     private val pad = 24.0
 
     private var hoveredId: String? = null
+    private var pendingHoverId: String? = null
     private var selectedId: String? = null
 
     /** Transparency chessboard (IDEA-style) drawn behind the image. On by default. */
     private var chessboardEnabled = true
 
-    /** Image-pixel grid (IDEA-style), shown only at >=100%. Off by default. */
+    /** Image-pixel grid, shown only at >=100%. Off by default. */
     private var gridEnabled = false
-    private val pointer = Point(0, 0)
+
+    /** Marquee (rubber-band) selection state, in panel pixels. */
+    private var marqueeOrigin: Point? = null
+    private var marqueeRect: Rectangle? = null
+
+    private var spaceDown = false
+    private var panLast: Point? = null
 
     /** Status callback (zoom % + selection) for the host application. */
     var onStatus: ((String) -> Unit)? = null
 
     /**
      * Fired after an interactive edit (move / resize / rotate) is committed to the SVG model.
-     * Hosts that bind the panel to a document (e.g. the IntelliJ editor) use this to write the
-     * updated [svgSource] back. Not invoked for plain re-renders or selection changes.
+     * Hosts that bind the panel to a document use this to write the updated [svgSource] back.
      */
     var onEdit: (() -> Unit)? = null
 
-    companion object {
-        private val ACCENT = Color(0x32, 0xCD, 0x79) // Leafier green
-        private val ROTATE_OFFSET = 22 // px above the box top
-        private val ROTATE_R = 5 // rotate handle radius
-        private val HANDLE = 8 // control point size
+    private class RenderTag(
+        val svg: String,
+        val w: Int,
+        val h: Int,
+    )
 
-        // --- Transparency chessboard (mirrors IDEA ImageComponent defaults) ---
-        private const val CHESS_CELL = 8 // px per half-cell on screen
-        private val CHESS_WHITE = Color.WHITE
-        private val CHESS_GRAY = Color(0xCC, 0xCC, 0xCC) // 204,204,204
-
-        // --- Image-pixel grid (mirrors IDEA ImageComponent grid) ---
-        private const val GRID_SPAN = 10 // image px between grid lines
-        private const val GRID_ZOOM_MIN = 1.0 // show grid only at >=100% (1 svg unit == 1 px)
-    }
+    private class LayerTag(
+        val svg: String,
+        val id: String,
+        val w: Int,
+        val h: Int,
+    )
 
     private val canvas =
         object : JPanel() {
@@ -120,33 +157,72 @@ class SvgEditorPanel(
             }
         }
 
+    private val scrollPane = JScrollPane(canvas)
+
+    /** Coalesces wheel-zoom / resize bursts into a single crisp re-render. */
+    private val crispTimer: Timer? =
+        scheduler?.let {
+            Timer(CRISP_DELAY_MS) {
+                renderAtDeviceSize()
+                canvas.repaint()
+            }.apply { isRepeats = false }
+        }
+
+    /** Pre-heats the drag layers shortly after hover, so press-and-drag never waits. */
+    private val preheatTimer: Timer? =
+        scheduler?.let {
+            Timer(PREHEAT_DELAY_MS) {
+                val id = pendingHoverId
+                if (selectedId == null && id != null && id != layerId) requestLayers(id)
+            }.apply { isRepeats = false }
+        }
+
+    companion object {
+        private const val CRISP_DELAY_MS = 160
+        private const val PREHEAT_DELAY_MS = 120
+
+        // --- Transparency chessboard (mirrors IDEA ImageComponent defaults) ---
+        private const val CHESS_CELL = 8 // px per half-cell on screen
+        private val CHESS_WHITE = Color.WHITE
+        private val CHESS_GRAY = Color(0xCC, 0xCC, 0xCC)
+
+        // --- Image-pixel grid ---
+        private const val GRID_SPAN = 10 // image px between grid lines
+        private const val GRID_ZOOM_MIN = 1.0 // show grid only at >=100%
+    }
+
     init {
-        setLayout(java.awt.BorderLayout())
-        // No hard-coded background: FlatLaf drives the canvas background so the editor follows
-        // the active theme (IntelliJ Light = near-white, Darcula = dark grey).
+        setLayout(BorderLayout())
         canvas.preferredSize = Dimension(640, 420)
+        canvas.isFocusable = true
         canvas.addComponentListener(
             object : ComponentAdapter() {
                 override fun componentResized(e: ComponentEvent) {
                     recomputeView()
-                    renderAtDeviceSize()
+                    if (scheduler != null) crispTimer?.restart() else renderAtDeviceSize()
                     canvas.repaint()
                 }
             },
         )
-        add(JScrollPane(canvas), java.awt.BorderLayout.CENTER)
+        scrollPane.border = null
+        scrollPane.verticalScrollBarPolicy = JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED
+        scrollPane.horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED
+        add(scrollPane, BorderLayout.CENTER)
         installMouse()
+        installKeys()
     }
 
     // ---- public API -------------------------------------------------------
 
     fun loadSvg(text: String) {
-        engine.load(text)
+        engine.loadLayoutOnly(text)
         selectedId = null
         hoveredId = null
+        pendingHoverId = null
         interaction.selected = null
         interaction.previewBox = null
         interaction.selectedHandle = null
+        interaction.previewAngle = 0.0
         clearLayers()
         recomputeView()
         renderAtDeviceSize()
@@ -158,7 +234,7 @@ class SvgEditorPanel(
     val layout: SvgLayout get() = engine.layout
 
     /** SVG source after edits. */
-    val svgSource: String get() = engine.svg
+    val svgSource: String get() = engine.svgSource
 
     /** Id of the currently selected element, or null. */
     val selectedElementId: String? get() = selectedId
@@ -170,7 +246,7 @@ class SvgEditorPanel(
 
     fun zoomOut() = zoomBy(1.0 / 1.2)
 
-    /** Zoom to 100%: 1 SVG user unit == 1 screen px (IDEA "Actual Size"). */
+    /** Zoom to 100%: 1 SVG user unit == 1 screen px. */
     fun actualSize() {
         val w = engine.layout.width
         val h = engine.layout.height
@@ -185,7 +261,7 @@ class SvgEditorPanel(
         emitStatus()
     }
 
-    /** Current zoom as a percentage relative to actual size (100% = 1 svg unit == 1 px). */
+    /** Current zoom as a percentage relative to actual size. */
     fun getZoomPercent(): Int = (viewScale * 100).toInt()
 
     fun setChessboard(on: Boolean) {
@@ -204,7 +280,7 @@ class SvgEditorPanel(
 
     fun isGrid(): Boolean = gridEnabled
 
-    /** Reset zoom to 100% of the fit view. */
+    /** Reset zoom to the fit view. */
     fun fitView() {
         zoom = 1.0
         recomputeView()
@@ -225,14 +301,186 @@ class SvgEditorPanel(
     /** Test hook: the inner canvas component (for synthetic event dispatch in tests). */
     fun debugCanvas(): java.awt.Component = canvas
 
-    // ---- internals --------------------------------------------------------
+    /** Release background resources (render thread + timers). */
+    fun dispose() {
+        crispTimer?.stop()
+        preheatTimer?.stop()
+        scheduler?.dispose()
+    }
 
-    private fun decode(png: ByteArray): BufferedImage? =
-        try {
-            ImageIO.read(java.io.ByteArrayInputStream(png))
-        } catch (e: Exception) {
+    // ---- internals: render pipeline ---------------------------------------
+
+    /** Logical unit -> device pixels at the current zoom + DPI. */
+    private fun devicePx(u: Double): Int = kotlin.math.max(1, kotlin.math.round(u * viewScale * dpiScale).toInt())
+
+    private fun currentDpi(): Double {
+        val s = canvas.graphicsConfiguration?.defaultTransform?.scaleX ?: 1.0
+        return if (s.isFinite() && s > 0) s else 1.0
+    }
+
+    /**
+     * Re-request every raster for the current view. In async mode this submits background
+     * jobs (never blocks the EDT); in sync mode it renders inline.
+     */
+    private fun renderAtDeviceSize() {
+        val w = engine.layout.width
+        val h = engine.layout.height
+        if (w <= 0 || h <= 0) return
+        dpiScale = currentDpi()
+        requestContent()
+        selectedId?.let { requestLayers(it) }
+        staticDirty = true
+    }
+
+    private fun requestContent() {
+        if (scheduler == null) {
+            offscreen = renderNow()
+            return
+        }
+        val tag = RenderTag(engine.svgSource, devicePx(engine.layout.width), devicePx(engine.layout.height))
+        val src = tag.svg
+        val rw = tag.w
+        val rh = tag.h
+        scheduler.submit(
+            RenderScheduler.Slot.CONTENT,
+            tag,
+            {
+                val r = renderer.renderRgba(src, rw, rh)
+                RgbaImages.fromRgba(r.rgba, r.width, r.height)
+            },
+        ) { result, t ->
+            val tt = t as? RenderTag
+            if (
+                result != null && tt != null &&
+                tt.svg === engine.svgSource &&
+                tt.w == devicePx(engine.layout.width) &&
+                tt.h == devicePx(engine.layout.height)
+            ) {
+                offscreen = result
+                staticDirty = true
+                canvas.repaint()
+            }
+        }
+    }
+
+    /** Inline render (sync mode / immediate paths). Returns null when there is nothing to show. */
+    private fun renderNow(): BufferedImage? {
+        val w = engine.layout.width
+        val h = engine.layout.height
+        if (w <= 0 || h <= 0) return null
+        val r = renderer.renderRgba(engine.svgSource, devicePx(w), devicePx(h))
+        return try {
+            RgbaImages.fromRgba(r.rgba, r.width, r.height)
+        } catch (_: Exception) {
             null
         }
+    }
+
+    /**
+     * Build the drag layers for `id`: a background raster with the element hidden plus a
+     * foreground raster with only the element (and its ancestor groups) visible. In async mode
+     * both renders share ONE background job so they always arrive as a consistent pair.
+     */
+    private fun requestLayers(id: String) {
+        if (scheduler == null) {
+            rebuildLayersSync(id)
+            return
+        }
+        val tag = LayerTag(engine.svgSource, id, devicePx(engine.layout.width), devicePx(engine.layout.height))
+        wantedLayer = tag
+        val src = tag.svg
+        val rw = tag.w
+        val rh = tag.h
+        scheduler.submit(
+            RenderScheduler.Slot.LAYERS,
+            tag,
+            {
+                val bg = renderer.renderRgba(SvgUtils.hideElement(src, id), rw, rh)
+                val fg = renderer.renderRgba(SvgUtils.soloElement(src, id), rw, rh)
+                RgbaImages.fromRgba(bg.rgba, bg.width, bg.height) to
+                    RgbaImages.fromRgba(fg.rgba, fg.width, fg.height)
+            },
+        ) { result, t ->
+            val tt = t as? LayerTag
+            if (result != null && tt != null && tt === wantedLayer && tt.svg === engine.svgSource) {
+                layerId = tt.id
+                bgImage = result.first
+                fgImage = result.second
+                buildFgCrop()
+                staticDirty = true
+                canvas.repaint()
+            }
+        }
+    }
+
+    private fun rebuildLayersSync(id: String) {
+        val w = engine.layout.width
+        val h = engine.layout.height
+        if (w <= 0 || h <= 0) return
+        val rw = devicePx(w)
+        val rh = devicePx(h)
+        val bg = renderer.renderRgba(SvgUtils.hideElement(engine.svgSource, id), rw, rh)
+        val fg = renderer.renderRgba(SvgUtils.soloElement(engine.svgSource, id), rw, rh)
+        layerId = id
+        bgImage = RgbaImages.fromRgba(bg.rgba, bg.width, bg.height)
+        fgImage = RgbaImages.fromRgba(fg.rgba, fg.width, fg.height)
+        buildFgCrop()
+        staticDirty = true
+    }
+
+    /**
+     * Crop [fgImage] down to the selected element's bounding box (plus padding so an arbitrary
+     * rotation never clips), so the per-frame foreground blit draws a small image.
+     */
+    private fun buildFgCrop() {
+        val fg = fgImage ?: run { fgCrop = null; return }
+        val el = engine.layout.byId(layerId ?: return) ?: run { fgCrop = null; return }
+        val dpr = dpiScale
+        val sx0 = el.x * viewScale * dpr
+        val sy0 = el.y * viewScale * dpr
+        val sw0 = el.width * viewScale * dpr
+        val sh0 = el.height * viewScale * dpr
+        if (sw0 <= 0.0 || sh0 <= 0.0) {
+            fgCrop = null
+            return
+        }
+        val padPx = kotlin.math.max(sw0, sh0)
+        val cx0 = (sx0 - padPx).coerceAtLeast(0.0)
+        val cy0 = (sy0 - padPx).coerceAtLeast(0.0)
+        val right = (sx0 + sw0 + padPx).coerceAtMost(fg.width.toDouble())
+        val bottom = (sy0 + sh0 + padPx).coerceAtMost(fg.height.toDouble())
+        val cw0 = right - cx0
+        val ch0 = bottom - cy0
+        if (cw0 < 1 || ch0 < 1) {
+            fgCrop = null
+            return
+        }
+        fgCrop = fg.getSubimage(cx0.toInt(), cy0.toInt(), cw0.toInt(), ch0.toInt())
+        fgCropX = cx0
+        fgCropY = cy0
+    }
+
+    private fun clearLayers() {
+        wantedLayer = null
+        scheduler?.cancel(RenderScheduler.Slot.LAYERS)
+        bgImage = null
+        fgImage = null
+        fgCrop = null
+        layerId = null
+    }
+
+    /** Refresh rasters after a committed edit (engine re-parsed the layout, zero raster work). */
+    private fun refreshAfterEdit(id: String) {
+        if (scheduler == null) {
+            offscreen = renderNow()
+            rebuildLayersSync(id)
+        } else {
+            requestContent()
+            requestLayers(id)
+        }
+    }
+
+    // ---- internals: view math ----------------------------------------------
 
     /** Recompute viewScale + offset + canvas preferred size from the current zoom. */
     private fun recomputeView() {
@@ -251,30 +499,6 @@ class SvgEditorPanel(
                 (h * viewScale).toInt().coerceAtLeast(1),
             )
         canvas.revalidate()
-    }
-
-    /**
-     * Render the off-screen PNG at the panel's true device resolution. The image is then
-     * drawn 1:1 (in device pixels) which removes the upscaling aliasing. DPI is read from
-     * the graphics configuration so HiDPI screens get a correspondingly larger render.
-     */
-    private fun renderAtDeviceSize() {
-        val w = engine.layout.width
-        val h = engine.layout.height
-        if (w <= 0 || h <= 0) return
-        dpiScale = currentDpi()
-        val rw = kotlin.math.max(1, kotlin.math.round(w * viewScale * dpiScale).toInt())
-        val rh = kotlin.math.max(1, kotlin.math.round(h * viewScale * dpiScale).toInt())
-        engine.renderAt(rw, rh)
-        offscreen = decode(engine.png)
-        // Keep drag layers crisp after zoom / resize / DPI changes.
-        if (selectedId != null) rebuildLayers()
-        staticDirty = true // base raster changed; re-bake the static composite
-    }
-
-    private fun currentDpi(): Double {
-        val s = canvas.graphicsConfiguration?.defaultTransform?.scaleX ?: 1.0
-        return if (s.isFinite() && s > 0) s else 1.0
     }
 
     /** Zoom by `factor`, keeping the SVG point under `(ax, ay)` (panel px) fixed when given. */
@@ -307,7 +531,9 @@ class SvgEditorPanel(
                 (h * viewScale).toInt().coerceAtLeast(1),
             )
         canvas.revalidate()
-        renderAtDeviceSize()
+        // Instant feedback: the existing bitmap is resampled by drawScaled. One crisp
+        // re-render follows once the wheel/resize burst settles.
+        if (scheduler != null) crispTimer?.restart() else renderAtDeviceSize()
         canvas.repaint()
         emitStatus()
     }
@@ -318,89 +544,112 @@ class SvgEditorPanel(
         my: Int,
     ): Pair<Double, Double> = ((mx - offsetX) / viewScale) to ((my - offsetY) / viewScale)
 
+    // ---- internals: input --------------------------------------------------
+
     private fun installMouse() {
         canvas.addMouseMotionListener(
             object : MouseMotionAdapter() {
-                override fun mouseMoved(e: MouseEvent) = handleHover(e.x, e.y)
+                override fun mouseMoved(e: MouseEvent) {
+                    if (spaceDown || panLast != null) return
+                    handleHover(e.x, e.y)
+                }
 
-                override fun mouseDragged(e: MouseEvent) = handleDrag(e.x, e.y)
+                override fun mouseDragged(e: MouseEvent) {
+                    when {
+                        panLast != null -> panTo(viewportPoint(e))
+                        marqueeOrigin != null -> updateMarquee(e.x, e.y)
+                        else -> handleDrag(e.x, e.y)
+                    }
+                }
             },
         )
 
         canvas.addMouseListener(
             object : MouseAdapter() {
-                override fun mousePressed(e: MouseEvent) = handlePress(e.x, e.y)
+                override fun mousePressed(e: MouseEvent) {
+                    canvas.requestFocusInWindow()
+                    when {
+                        SwingUtilities.isMiddleMouseButton(e) -> {
+                            panLast = viewportPoint(e)
+                            updateCursor()
+                        }
+                        spaceDown -> {
+                            panLast = viewportPoint(e)
+                            updateCursor()
+                        }
+                        SwingUtilities.isLeftMouseButton(e) -> handlePress(e.x, e.y)
+                    }
+                }
 
-                override fun mouseReleased(e: MouseEvent) = handleRelease()
+                override fun mouseReleased(e: MouseEvent) {
+                    if (panLast != null) {
+                        panLast = null
+                        updateCursor()
+                    } else if (SwingUtilities.isLeftMouseButton(e)) {
+                        handleRelease()
+                    }
+                }
 
                 override fun mouseClicked(e: MouseEvent) {
-                    if (e.clickCount == 2) handleDoubleClick(e.x, e.y)
+                    if (e.clickCount == 2 && SwingUtilities.isLeftMouseButton(e)) handleDoubleClick(e.x, e.y)
                 }
             },
         )
 
-        canvas.addMouseWheelListener(
-            object : MouseWheelListener {
-                override fun mouseWheelMoved(e: MouseWheelEvent) {
-                    val f = if (e.wheelRotation < 0) 1.1 else 1.0 / 1.1
-                    zoomBy(f, e.x.toDouble(), e.y.toDouble())
+        canvas.addMouseWheelListener { e ->
+            val f = if (e.wheelRotation < 0) 1.1 else 1.0 / 1.1
+            zoomBy(f, e.x.toDouble(), e.y.toDouble())
+        }
+    }
+
+    private fun installKeys() {
+        canvas.addKeyListener(
+            object : KeyAdapter() {
+                override fun keyPressed(e: KeyEvent) {
+                    if (e.keyCode == KeyEvent.VK_SPACE && !spaceDown) {
+                        spaceDown = true
+                        updateCursor()
+                    }
+                }
+
+                override fun keyReleased(e: KeyEvent) {
+                    if (e.keyCode == KeyEvent.VK_SPACE) {
+                        spaceDown = false
+                        updateCursor()
+                    }
                 }
             },
         )
     }
 
-    private fun rebuildLayers() {
-        if (selectedId != null) {
-            engine.selectForEditing(selectedId!!)
-            bgImage = decode(engine.bgPng)
-            fgImage = decode(engine.fgPng)
-            layerId = selectedId
-            buildFgCrop()
-        } else {
-            clearLayers()
-        }
+    private fun viewportPoint(e: MouseEvent): Point = SwingUtilities.convertPoint(e.component, e.point, scrollPane.viewport)
+
+    private fun panTo(p: Point) {
+        val last = panLast ?: return
+        val vp = scrollPane.viewport
+        val pos = vp.viewPosition
+        vp.viewPosition =
+            Point(
+                (pos.x + last.x - p.x).coerceAtLeast(0),
+                (pos.y + last.y - p.y).coerceAtLeast(0),
+            )
+        panLast = p
     }
 
-    /**
-     * Crop [fgImage] down to the selected element's bounding box (plus padding so an arbitrary
-     * rotation never clips), so the per-frame foreground blit draws a small image instead of the
-     * whole canvas-sized raster.
-     */
-    private fun buildFgCrop() {
-        val fg = fgImage ?: run { fgCrop = null; return }
-        val el = engine.layout.byId(layerId ?: return) ?: run { fgCrop = null; return }
-        val dpr = dpiScale
-        val sx0 = el.x * viewScale * dpr
-        val sy0 = el.y * viewScale * dpr
-        val sw0 = el.width * viewScale * dpr
-        val sh0 = el.height * viewScale * dpr
-        if (sw0 <= 0.0 || sh0 <= 0.0) {
-            fgCrop = null
-            return
-        }
-        // Pad by the larger dimension so the rect keeps all its corners inside the crop for any angle.
-        val pad = kotlin.math.max(sw0, sh0)
-        var cx0 = (sx0 - pad).coerceAtLeast(0.0)
-        var cy0 = (sy0 - pad).coerceAtLeast(0.0)
-        val right = (sx0 + sw0 + pad).coerceAtMost(fg.width.toDouble())
-        val bottom = (sy0 + sh0 + pad).coerceAtMost(fg.height.toDouble())
-        val cw0 = right - cx0
-        val ch0 = bottom - cy0
-        if (cw0 < 1 || ch0 < 1) {
-            fgCrop = null
-            return
-        }
-        fgCrop = fg.getSubimage(cx0.toInt(), cy0.toInt(), cw0.toInt(), ch0.toInt())
-        fgCropX = cx0
-        fgCropY = cy0
-    }
-
-    private fun clearLayers() {
-        engine.clearLayers()
-        bgImage = null
-        fgImage = null
-        fgCrop = null
-        layerId = null
+    private fun updateCursor() {
+        canvas.cursor =
+            when {
+                panLast != null || spaceDown -> Cursor(Cursor.HAND_CURSOR)
+                interaction.selectedHandle != null -> when (interaction.selectedHandle) {
+                    InteractionController.Handle.NW, InteractionController.Handle.SE -> Cursor(Cursor.NW_RESIZE_CURSOR)
+                    InteractionController.Handle.NE, InteractionController.Handle.SW -> Cursor(Cursor.NE_RESIZE_CURSOR)
+                    InteractionController.Handle.N, InteractionController.Handle.S -> Cursor(Cursor.N_RESIZE_CURSOR)
+                    InteractionController.Handle.E, InteractionController.Handle.W -> Cursor(Cursor.E_RESIZE_CURSOR)
+                    else -> Cursor.getDefaultCursor()
+                }
+                hoveredId != null -> Cursor(Cursor.MOVE_CURSOR)
+                else -> Cursor.getDefaultCursor()
+            }
     }
 
     // --- event handlers (also exercised directly by tests via debug* hooks) -------
@@ -409,25 +658,18 @@ class SvgEditorPanel(
         x: Int,
         y: Int,
     ) {
-        pointer.x = x
-        pointer.y = y
         val (ix, iy) = toImage(x, y)
-        val tol = 6.0 / viewScale
-        interaction.onHoverMove(engine.layout, ix, iy, tol)
-        hoveredId = interaction.hovered?.id
-        canvas.cursor =
-            when (interaction.selectedHandle) {
-                InteractionController.Handle.NW, InteractionController.Handle.SE -> Cursor(Cursor.NW_RESIZE_CURSOR)
-                InteractionController.Handle.NE, InteractionController.Handle.SW -> Cursor(Cursor.NE_RESIZE_CURSOR)
-                InteractionController.Handle.N, InteractionController.Handle.S -> Cursor(Cursor.N_RESIZE_CURSOR)
-                InteractionController.Handle.E, InteractionController.Handle.W -> Cursor(Cursor.E_RESIZE_CURSOR)
-                null ->
-                    if (interaction.hovered != null) {
-                        Cursor(Cursor.MOVE_CURSOR)
-                    } else {
-                        Cursor.getDefaultCursor()
-                    }
+        interaction.onHoverMove(engine.layout, ix, iy, EditorTheme.HANDLE_TOLERANCE / viewScale)
+        val newHover = interaction.hovered?.id
+        if (newHover != hoveredId) {
+            hoveredId = newHover
+            pendingHoverId = newHover
+            // Pre-heat the drag layers shortly after hover so the first drag is already warm.
+            if (scheduler != null && newHover != null && selectedId == null && newHover != layerId) {
+                preheatTimer?.restart()
             }
+        }
+        updateCursor()
         canvas.repaint()
     }
 
@@ -435,13 +677,10 @@ class SvgEditorPanel(
         x: Int,
         y: Int,
     ) {
-        pointer.x = x
-        pointer.y = y
         val (ix, iy) = toImage(x, y)
         interaction.onDragMove(engine.layout, ix, iy)
-        // repaint() (not paintImmediately) lets Swing coalesce multiple mouse-dragged events
-        // into a single paint aligned with the display refresh — so the EDT is never saturated
-        // by synchronous full-canvas repaints (the previous cause of dropped frames / stutter).
+        // repaint() (not paintImmediately) lets Swing coalesce drag events into one paint per
+        // frame; the moving element comes from the cached fgCrop blit, never from resvg.
         canvas.repaint()
     }
 
@@ -450,65 +689,137 @@ class SvgEditorPanel(
         y: Int,
     ) {
         val (ix, iy) = toImage(x, y)
-        val tol = 6.0 / viewScale
-        // The rotate handle (a circle above the selection box) takes priority over body/resize
-        // hits. It is only reachable once an element is already selected.
+        val tol = EditorTheme.HANDLE_TOLERANCE / viewScale
+        // The rotate handle (a circle above the selection box) takes priority.
         selectedId?.let { sid ->
             engine.layout.byId(sid)?.let { el ->
-                val rx = offsetX + el.x * viewScale
-                val ry = offsetY + el.y * viewScale
-                val rw = el.width * viewScale
-                val rh = el.height * viewScale
-                val hcx = rx + rw / 2.0
-                val hcy = ry - ROTATE_OFFSET
-                if (kotlin.math.hypot(x - hcx, y - hcy) <= (ROTATE_R + 6.0)) {
+                val hcx = offsetX + (el.x + el.width / 2.0) * viewScale
+                val hcy = offsetY + el.y * viewScale - EditorTheme.ROTATE_OFFSET
+                if (kotlin.math.hypot(x - hcx, y - hcy) <= (EditorTheme.ROTATE_R + EditorTheme.HANDLE_TOLERANCE)) {
                     val cxSvg = el.x + el.width / 2.0
                     val cySvg = el.y + el.height / 2.0
                     val ang = kotlin.math.atan2(iy - cySvg, ix - cxSvg) * 180.0 / Math.PI
-                    selectedId = sid
                     interaction.startRotate(cxSvg, cySvg, ang)
-                    rebuildLayers()
+                    selectedId = sid
+                    if (layerId != sid) requestLayers(sid)
                     canvas.repaint()
                     return
                 }
             }
         }
+        // Empty canvas away from the current selection's handles: start a marquee (and clear
+        // the selection, preserving the click-empty-deselect behavior for <3px drags).
+        val hit = CollisionDetector.hitTest(engine.layout, ix, iy)
+        if (hit == null && !nearSelectionHandles(x, y)) {
+            marqueeOrigin = Point(x, y)
+            marqueeRect = null
+            interaction.selected = null
+            interaction.selectedHandle = null
+            selectedId = null
+            clearLayers()
+            canvas.repaint()
+            return
+        }
         interaction.onMousePressed(engine.layout, ix, iy, tol)
         val newSel = interaction.selected?.id
         selectedId = newSel
-        // Always re-bake the drag layers on press. The cached layers are resolution-dependent
-        // (viewScale/dpiScale), so they must be refreshed even if the selection id did not change
-        // (e.g. after zooming, or pressing an already-selected element to drag again).
-        if (newSel != null) rebuildLayers() else clearLayers()
-        staticDirty = true // drag state / base raster changed; re-bake the static composite
+        if (newSel != null) {
+            if (layerId != newSel) requestLayers(newSel)
+        } else {
+            clearLayers()
+        }
+        staticDirty = true
         canvas.repaint()
     }
 
+    /** True when `(x, y)` in panel px sits on one of the current selection's control points. */
+    private fun nearSelectionHandles(
+        x: Int,
+        y: Int,
+    ): Boolean {
+        val sid = selectedId ?: return false
+        val el = engine.layout.byId(sid) ?: return false
+        val box = interaction.previewBox ?: InteractionController.Box(el.x, el.y, el.width, el.height)
+        for (h in InteractionController.Handle.entries) {
+            val (hx, hy) = interaction.handlePoint(box, h)
+            val px = offsetX + hx * viewScale
+            val py = offsetY + hy * viewScale
+            if (kotlin.math.hypot(x - px, y - py) <= EditorTheme.HANDLE_TOLERANCE) return true
+        }
+        return false
+    }
+
+    private fun updateMarquee(
+        x: Int,
+        y: Int,
+    ) {
+        val o = marqueeOrigin ?: return
+        marqueeRect =
+            Rectangle(
+                kotlin.math.min(o.x, x),
+                kotlin.math.min(o.y, y),
+                kotlin.math.abs(x - o.x),
+                kotlin.math.abs(y - o.y),
+            )
+        canvas.repaint()
+    }
+
+    private fun finishMarquee() {
+        val r = marqueeRect
+        marqueeOrigin = null
+        marqueeRect = null
+        if (r == null) return
+        if (r.width < 3 && r.height < 3) {
+            clearLayers()
+            canvas.repaint()
+            return
+        }
+        val sx = (r.x - offsetX) / viewScale
+        val sy = (r.y - offsetY) / viewScale
+        val sw = r.width / viewScale
+        val sh = r.height / viewScale
+        // lastOrNull = topmost element intersecting the band, matching the z-order feel.
+        val top = engine.layout.intersecting(sx, sy, sw, sh).lastOrNull()
+        if (top != null) {
+            interaction.selected = top
+            interaction.selectedHandle = null
+            selectedId = top.id
+            requestLayers(top.id)
+        } else {
+            interaction.selected = null
+            selectedId = null
+            clearLayers()
+        }
+        canvas.repaint()
+        emitStatus()
+    }
+
     private fun handleRelease() {
+        if (marqueeOrigin != null || marqueeRect != null) {
+            finishMarquee()
+            return
+        }
         val res = interaction.onMouseReleased()
         when (res) {
             is InteractionController.EditResult.Move -> {
                 engine.moveElement(res.element.id, res.dx, res.dy)
-                offscreen = decode(engine.png)
                 selectedId = res.element.id
-                rebuildLayers()
+                refreshAfterEdit(res.element.id)
             }
             is InteractionController.EditResult.Resize -> {
                 engine.setElementBox(res.element.id, res.x, res.y, res.w, res.h)
-                offscreen = decode(engine.png)
                 selectedId = res.element.id
-                rebuildLayers()
+                refreshAfterEdit(res.element.id)
             }
             is InteractionController.EditResult.Rotate -> {
                 engine.rotateElement(res.element.id, res.angle, res.cx, res.cy)
-                offscreen = decode(engine.png)
                 selectedId = res.element.id
-                rebuildLayers()
+                refreshAfterEdit(res.element.id)
             }
             null -> {}
         }
         if (res != null) onEdit?.invoke()
-        staticDirty = true // offscreen / selection changed; re-bake the static composite
+        staticDirty = true
         canvas.repaint()
         emitStatus()
     }
@@ -520,7 +831,7 @@ class SvgEditorPanel(
         val (ix, iy) = toImage(x, y)
         if (interaction.onDoubleClick(engine.layout, ix, iy)) {
             selectedId = interaction.selected?.id
-            rebuildLayers()
+            selectedId?.let { requestLayers(it) }
             canvas.repaint()
             emitStatus()
         }
@@ -598,30 +909,22 @@ class SvgEditorPanel(
     // ---- rendering --------------------------------------------------------
 
     private fun renderCanvas(g: Graphics2D) {
-        // Use the layered compositing (baked background + cropped foreground) whenever a
-        // selected element has cached layers — both DURING a drag and while it is at rest.
-        // This keeps the rendering representation identical across the drag->release boundary,
-        // so the element never "pops" from the raster preview to a re-rendered offscreen (the
-        // flash + apparent position jump reported at drag end). The foreground crop is simply
-        // re-baked at the committed position on release, and committed == last preview, so it
-        // lands in exactly the same place.
-        val useLayers = layerId != null && fgImage != null
+        // Layered compositing (baked bg + cropped fg) whenever a selected element has cached
+        // layers — both DURING a drag and at rest — so the representation is identical across
+        // the drag->release boundary and the element never "pops" between preview and commit.
+        val useLayers = layerId != null && bgImage != null && fgImage != null
         if (useLayers) {
-            staticDrag = true // base raster for the layers is the bg layer (element hidden)
+            staticDrag = true // the base raster for the layers is the bg layer (element hidden)
             if (staticLayer == null || staticDirty || staticBgColor != background) {
                 rebuildStaticLayer()
             }
             staticLayer?.let { g.drawImage(it, 0, 0, null) }
                 ?: run { g.color = background; g.fillRect(0, 0, width, height) }
-            if (fgCrop != null) {
-                drawFg(g)
-            }
+            if (fgCrop != null) drawFg(g)
         } else {
-            // Idle path: draw the full render directly. We skip the intermediate static layer for
-            // idle frames because routing `offscreen` through an extra BufferedImage can trigger
-            // Java2D colour-management conversions that shift exact pixel values and break the
-            // headless pixel-consistency checks. Drag frames are unaffected because the dragged
-            // element is supplied by `fgCrop`, not by the base raster.
+            // Idle path: draw the full render directly. Skipping the intermediate static layer
+            // avoids Java2D colour-management conversions that can shift exact pixel values and
+            // break the headless pixel-consistency checks.
             paintBackground(g)
             if (gridEnabled) drawGrid(g)
             offscreen?.let { drawScaled(g, it) }
@@ -631,7 +934,7 @@ class SvgEditorPanel(
         drawHover(g)
         drawSelection(g)
         drawSnap(g)
-        drawCrosshair(g)
+        drawMarquee(g)
     }
 
     private fun drawScaled(
@@ -645,7 +948,7 @@ class SvgEditorPanel(
         val dh = img.height / dpiScale
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
         g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
-        val at = java.awt.geom.AffineTransform()
+        val at = AffineTransform()
         at.translate(offsetX, offsetY)
         at.scale(dw / img.width, dh / img.height)
         g.drawImage(img, at, null)
@@ -672,7 +975,7 @@ class SvgEditorPanel(
             val dh = base.height / dpiScale
             g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
             g2.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
-            val at = java.awt.geom.AffineTransform()
+            val at = AffineTransform()
             at.translate(offsetX, offsetY)
             at.scale(dw / base.width, dh / base.height)
             g2.drawImage(base, at, null)
@@ -685,10 +988,9 @@ class SvgEditorPanel(
 
     /**
      * Composite the foreground (selected element) at the preview box using a single floating
-     * point [java.awt.geom.AffineTransform] over the pre-cropped [fgCrop] raster. The crop is
-     * just the element's bounding box (plus rotation padding), so this blits a small image
-     * instead of the whole canvas-sized raster — cheap enough to run every frame at full fps.
-     * The continuous transform means move/resize/rotate follow the cursor smoothly.
+     * point [AffineTransform] over the pre-cropped [fgCrop] raster. The crop is just the
+     * element's bounding box (plus rotation padding), so this blits a small image instead of
+     * the whole canvas-sized raster — cheap enough to run every frame at full fps.
      */
     private fun drawFg(g: Graphics2D) {
         val fg = fgCrop ?: return
@@ -717,16 +1019,14 @@ class SvgEditorPanel(
         // Map the element centre (crop-local) -> the destination centre, scaling then rotating
         // about that centre. Applied right-to-left, so the centre lands exactly on the preview
         // box centre regardless of the padding offset baked into the crop.
-        val at = java.awt.geom.AffineTransform()
+        val at = AffineTransform()
         at.translate(dx + dw / 2.0, dy + dh / 2.0)
         at.rotate(rad)
         at.scale(s, d)
         at.translate(-(ex + sw0 / 2.0), -(ey + sh0 / 2.0))
         // The committed resvg render is clipped to the SVG viewBox. Without the same clip here,
-        // the live preview can show pixels that resvg will later discard (e.g. a rectangle
-        // resized beyond the canvas bottom), so on release the element appears to "jump up" as
-        // the overhanging part vanishes. Clip the foreground blit to the viewBox bounds so the
-        // preview always matches the committed output.
+        // the live preview can show pixels that resvg will later discard — clip the foreground
+        // blit to the viewBox bounds so the preview always matches the committed output.
         val oldClip = g.clip
         val vbW = (engine.layout.width * viewScale).toInt().coerceAtLeast(1)
         val vbH = (engine.layout.height * viewScale).toInt().coerceAtLeast(1)
@@ -765,7 +1065,7 @@ class SvgEditorPanel(
         val texture =
             TexturePaint(
                 tile,
-                java.awt.geom.Rectangle2D.Double(ax, ay, tile.width.toDouble(), tile.height.toDouble()),
+                Rectangle2D.Double(ax, ay, tile.width.toDouble(), tile.height.toDouble()),
             )
         val old = g.paint
         g.paint = texture
@@ -774,9 +1074,9 @@ class SvgEditorPanel(
     }
 
     /**
-     * IDEA-aligned image-pixel grid: a line every [GRID_SPAN] image (SVG) pixels, drawn only when
-     * zoomed in enough that 1 image px >= 1 screen px ([GRID_ZOOM_MIN]). Lines are scoped to the
-     * image bounds (IDEA draws the grid over the image, not the whole viewport).
+     * IDEA-aligned image-pixel grid: a line every [GRID_SPAN] image (SVG) pixels, drawn only
+     * when zoomed in enough that 1 image px >= 1 screen px ([GRID_ZOOM_MIN]). Lines are scoped
+     * to the image bounds.
      */
     private fun drawGrid(g: Graphics2D) {
         val w = engine.layout.width
@@ -811,23 +1111,25 @@ class SvgEditorPanel(
         }
     }
 
+    /** LeaferJS-style hover highlight: a soft rounded accent outline (float precision). */
     private fun drawHover(g: Graphics2D) {
         hoveredId?.takeIf { it != selectedId }?.let { engine.layout.byId(it) }?.let { el ->
-            val rx = (offsetX + el.x * viewScale).toInt()
-            val ry = (offsetY + el.y * viewScale).toInt()
-            val rw = (el.width * viewScale).toInt()
-            val rh = (el.height * viewScale).toInt()
-            g.color = Color(ACCENT.red, ACCENT.green, ACCENT.blue, 130)
-            g.stroke = BasicStroke(1.5f)
-            g.drawRect(rx, ry, rw, rh)
+            val rx = offsetX + el.x * viewScale
+            val ry = offsetY + el.y * viewScale
+            val rw = el.width * viewScale
+            val rh = el.height * viewScale
+            g.color = EditorTheme.ACCENT_HOVER
+            g.stroke = BasicStroke(EditorTheme.STROKE)
+            g.draw(RoundRectangle2D.Double(rx, ry, rw, rh, 4.0, 4.0))
         }
     }
 
+    /** LeaferJS-style selection: float outline, round dot handles, rotate lever + grip. */
     private fun drawSelection(g: Graphics2D) {
         selectedId?.let { id ->
             engine.layout.byId(id)?.let { el ->
-                // While dragging, the box tracks the (snapped) preview box; otherwise it sits on
-                // the element's resting geometry. previewAngle rotates the whole overlay.
+                // While dragging, the box tracks the (snapped) preview box; otherwise it sits
+                // on the element's resting geometry. previewAngle rotates the whole overlay.
                 val box = interaction.previewBox
                     ?: InteractionController.Box(el.x, el.y, el.width, el.height)
                 val rad = Math.toRadians(interaction.previewAngle)
@@ -835,47 +1137,52 @@ class SvgEditorPanel(
                 val bcy = offsetY + (box.y + box.h / 2) * viewScale
                 val rot: (Double, Double) -> Pair<Double, Double> = { px, py -> rotatePt(px, py, bcx, bcy, rad) }
 
-                // Selection outline (rotated polygon).
-                val corners =
-                    arrayOf(
-                        rot(offsetX + box.x * viewScale, offsetY + box.y * viewScale),
-                        rot(offsetX + (box.x + box.w) * viewScale, offsetY + box.y * viewScale),
-                        rot(offsetX + (box.x + box.w) * viewScale, offsetY + (box.y + box.h) * viewScale),
-                        rot(offsetX + box.x * viewScale, offsetY + (box.y + box.h) * viewScale),
-                    )
-                g.color = ACCENT
-                g.stroke = BasicStroke(1.5f)
-                for (i in 0..3) {
-                    val a = corners[i]
-                    val b = corners[(i + 1) % 4]
-                    g.drawLine(a.first.toInt(), a.second.toInt(), b.first.toInt(), b.second.toInt())
-                }
+                // Selection outline as a floating-point rotated path (crisper than int lines).
+                val c0 = rot(offsetX + box.x * viewScale, offsetY + box.y * viewScale)
+                val c1 = rot(offsetX + (box.x + box.w) * viewScale, offsetY + box.y * viewScale)
+                val c2 = rot(offsetX + (box.x + box.w) * viewScale, offsetY + (box.y + box.h) * viewScale)
+                val c3 = rot(offsetX + box.x * viewScale, offsetY + (box.y + box.h) * viewScale)
+                val outline = Path2D.Double()
+                outline.moveTo(c0.first, c0.second)
+                outline.lineTo(c1.first, c1.second)
+                outline.lineTo(c2.first, c2.second)
+                outline.lineTo(c3.first, c3.second)
+                outline.closePath()
+                g.color = EditorTheme.ACCENT
+                g.stroke = BasicStroke(EditorTheme.STROKE)
+                g.draw(outline)
 
-                // 8 control points (white fill, accent outline).
-                val s = HANDLE
+                // 8 round control points (white fill, accent outline).
+                val r = EditorTheme.HANDLE / 2.0
                 for (h in InteractionController.Handle.entries) {
                     val (hx, hy) = interaction.handlePoint(box, h)
                     val (px, py) = rot(offsetX + hx * viewScale, offsetY + hy * viewScale)
-                    g.color = Color.WHITE
-                    g.fillRect(px.toInt() - s / 2, py.toInt() - s / 2, s, s)
-                    g.color = ACCENT
-                    g.stroke = BasicStroke(1.5f)
-                    g.drawRect(px.toInt() - s / 2, py.toInt() - s / 2, s, s)
+                    val dot =
+                        Ellipse2D.Double(px - r, py - r, EditorTheme.HANDLE.toDouble(), EditorTheme.HANDLE.toDouble())
+                    g.color = EditorTheme.HANDLE_FILL
+                    g.fill(dot)
+                    g.color = EditorTheme.ACCENT
+                    g.draw(dot)
                 }
 
-                // Rotate handle: a line from the top-centre of the box up to a circular grip.
+                // Rotate handle: a lever from the top-centre of the box up to a circular grip.
                 val topCx = offsetX + (box.x + box.w / 2) * viewScale
                 val topCy = offsetY + box.y * viewScale
                 val (lx, ly) = rot(topCx, topCy)
-                val (hx, hy) = rot(topCx, topCy - ROTATE_OFFSET)
-                g.color = ACCENT
-                g.stroke = BasicStroke(1.5f)
-                g.drawLine(lx.toInt(), ly.toInt(), hx.toInt(), hy.toInt())
-                g.color = Color.WHITE
-                g.fillOval(hx.toInt() - ROTATE_R, hy.toInt() - ROTATE_R, ROTATE_R * 2, ROTATE_R * 2)
-                g.color = ACCENT
-                g.stroke = BasicStroke(1.5f)
-                g.drawOval(hx.toInt() - ROTATE_R, hy.toInt() - ROTATE_R, ROTATE_R * 2, ROTATE_R * 2)
+                val (hx2, hy2) = rot(topCx, topCy - EditorTheme.ROTATE_OFFSET)
+                g.color = EditorTheme.ACCENT
+                g.draw(Line2D.Double(lx, ly, hx2, hy2))
+                val grip =
+                    Ellipse2D.Double(
+                        hx2 - EditorTheme.ROTATE_R,
+                        hy2 - EditorTheme.ROTATE_R,
+                        EditorTheme.ROTATE_R * 2.0,
+                        EditorTheme.ROTATE_R * 2.0,
+                    )
+                g.color = EditorTheme.HANDLE_FILL
+                g.fill(grip)
+                g.color = EditorTheme.ACCENT
+                g.draw(grip)
             }
         }
     }
@@ -897,7 +1204,7 @@ class SvgEditorPanel(
 
     private fun drawSnap(g: Graphics2D) {
         if (interaction.snapLines.isEmpty()) return
-        g.color = Color(0xFF, 0x3B, 0x3B)
+        g.color = EditorTheme.SNAP
         g.stroke = BasicStroke(1f)
         for (line in interaction.snapLines) {
             if (line.vertical) {
@@ -910,11 +1217,13 @@ class SvgEditorPanel(
         }
     }
 
-    private fun drawCrosshair(g: Graphics2D) {
-        val bg = canvas.background
-        val lum = 0.299 * bg.red + 0.587 * bg.green + 0.114 * bg.blue
-        g.color = if (lum > 140) Color(0x33, 0x33, 0x33) else Color.WHITE
-        g.drawLine(pointer.x - 8, pointer.y, pointer.x + 8, pointer.y)
-        g.drawLine(pointer.x, pointer.y - 8, pointer.x, pointer.y + 8)
+    /** Rubber-band rectangle while marquee-selecting (dashed accent, translucent fill). */
+    private fun drawMarquee(g: Graphics2D) {
+        val r = marqueeRect ?: return
+        g.color = EditorTheme.MARQUEE_FILL
+        g.fill(r)
+        g.color = EditorTheme.ACCENT
+        g.stroke = EditorTheme.marqueeStroke()
+        g.draw(r)
     }
 }

@@ -23,6 +23,8 @@ import java.awt.dnd.DropTarget
 import java.awt.dnd.DropTargetAdapter
 import java.awt.dnd.DropTargetDropEvent
 import java.awt.event.KeyEvent
+import java.awt.event.WindowAdapter
+import java.awt.event.WindowEvent
 import java.awt.image.BufferedImage
 import java.io.File
 import javax.imageio.ImageIO
@@ -492,7 +494,9 @@ private fun blueCentroid(img: BufferedImage): Pair<Double, Double>? {
 
 private fun launchGui() {
     val renderer = loadRenderer()
-    val panel = SvgEditorPanel(renderer)
+    // The GUI runs the async pipeline: renders happen on a background thread and the EDT only
+    // blits, so pan/zoom/drag stay at full fps even for large SVGs.
+    val panel = SvgEditorPanel(renderer, asyncRendering = true)
     val sourceArea =
         JTextArea(Samples.SIMPLE, 24, 60).apply {
             font = Font(Font.MONOSPACED, Font.PLAIN, 13)
@@ -504,6 +508,13 @@ private fun launchGui() {
         JFrame("SVG Editor").apply {
             defaultCloseOperation = JFrame.EXIT_ON_CLOSE
             size = Dimension(1200, 760)
+            addWindowListener(
+                object : WindowAdapter() {
+                    override fun windowClosing(e: WindowEvent?) {
+                        panel.dispose()
+                    }
+                },
+            )
         }
 
     // IDEA-style main menu bar.

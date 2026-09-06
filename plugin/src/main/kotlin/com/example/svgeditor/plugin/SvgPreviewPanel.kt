@@ -116,6 +116,7 @@ class SvgPreviewPanel(
 
     override fun dispose() {
         document?.removeDocumentListener(documentListener)
+        panel.dispose()
     }
 
     override fun <T : Any?> getUserData(key: Key<T>): T? = userDataHolder.getUserData(key)

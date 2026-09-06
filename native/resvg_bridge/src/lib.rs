@@ -6,7 +6,11 @@
 //!    panel decodes these into an off-screen [`java.awt.image.BufferedImage`] which is
 //!    then blitted to the visible panel. This is the "off-screen canvas".
 //!
-//! 2. [`svg_layout_json`] — parse the SVG and emit a JSON document describing every
+//! 2. [`svg_render_rgba_bytes`] — render to **raw premultiplied RGBA8** pixels.
+//!    Same pixels as (1) but without PNG encode/decode; the Kotlin scheduler uses
+//!    this on the hot path so editing stays lag-free.
+//!
+//! 3. [`svg_layout_json`] — parse the SVG and emit a JSON document describing every
 //!    rendered element: its `id`, its **absolute bounding box** in canvas coordinates,
 //!    and its affine `transform`. The Kotlin [`CollisionDetector`] uses these boxes to
 //!    hit-test the mouse pointer and to drive drag-to-move editing.
@@ -157,6 +161,71 @@ fn layout_json(tree: &usvg::Tree) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Shared render pipeline
+// ---------------------------------------------------------------------------
+
+/// Parse `svg_str` and render it at a uniform scale that fits inside
+/// `(fit_w, fit_h)` (0/0 means "natural size"). Returns the pixmap plus the
+/// effective pixel size.
+fn render_tree(svg_str: &str, fit_w: u32, fit_h: u32) -> Option<(tiny_skia::Pixmap, u32, u32)> {
+    let opts = usvg::Options::default();
+    let tree = match usvg::Tree::from_str(svg_str, &opts) {
+        Ok(t) => t,
+        Err(_) => return None,
+    };
+
+    let size = tree.size();
+    let (sw, sh) = (size.width(), size.height());
+    let scale = if fit_w > 0 && fit_h > 0 {
+        let s = (fit_w as f32 / sw).min(fit_h as f32 / sh);
+        if s.is_finite() && s > 0.0 {
+            s
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
+    let pw = (sw * scale).ceil().max(1.0) as u32;
+    let ph = (sh * scale).ceil().max(1.0) as u32;
+
+    let mut pixmap = tiny_skia::Pixmap::new(pw, ph)?;
+    let transform = usvg::Transform {
+        sx: scale,
+        kx: 0.0,
+        ky: 0.0,
+        sy: scale,
+        tx: 0.0,
+        ty: 0.0,
+    };
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    Some((pixmap, pw, ph))
+}
+
+/// Hand a `Vec<u8>` to the caller via the buffer registry (ownership transfer).
+fn hand_out_buffer(mut v: Vec<u8>, out_len: *mut u32, out_w: *mut u32, out_h: *mut u32, pw: u32, ph: u32) -> *mut u8 {
+    let len = v.len();
+    let cap = v.capacity();
+    let ptr_out = v.as_mut_ptr();
+    std::mem::forget(v); // ownership transferred to the caller (via registry)
+
+    unsafe {
+        *out_len = len as u32;
+        *out_w = pw;
+        *out_h = ph;
+    }
+    register_buffer(ptr_out, len, cap)
+}
+
+/// Parse an NUL-terminated C string argument, or return null on invalid UTF-8.
+unsafe fn svg_arg<'a>(svg: *const c_char) -> Option<&'a str> {
+    if svg.is_null() {
+        return None;
+    }
+    CStr::from_ptr(svg).to_str().ok()
+}
+
+// ---------------------------------------------------------------------------
 // C-ABI entry points
 // ---------------------------------------------------------------------------
 
@@ -180,64 +249,54 @@ pub unsafe extern "C" fn svg_render_png_bytes(
     out_w: *mut u32,
     out_h: *mut u32,
 ) -> *mut u8 {
-    if svg.is_null() || out_len.is_null() || out_w.is_null() || out_h.is_null() {
-        return ptr::null_mut();
-    }
-    let cstr = CStr::from_ptr(svg);
-    let svg_str = match cstr.to_str() {
-        Ok(s) => s,
-        Err(_) => return ptr::null_mut(),
-    };
-
-    let opts = usvg::Options::default();
-    let tree = match usvg::Tree::from_str(svg_str, &opts) {
-        Ok(t) => t,
-        Err(_) => return ptr::null_mut(),
-    };
-
-    let size = tree.size();
-    let (sw, sh) = (size.width(), size.height());
-    let scale = if fit_w > 0 && fit_h > 0 {
-        let s = (fit_w as f32 / sw).min(fit_h as f32 / sh);
-        if s.is_finite() && s > 0.0 {
-            s
-        } else {
-            1.0
-        }
-    } else {
-        1.0
-    };
-    let pw = (sw * scale).ceil().max(1.0) as u32;
-    let ph = (sh * scale).ceil().max(1.0) as u32;
-
-    let mut pixmap = match tiny_skia::Pixmap::new(pw, ph) {
-        Some(p) => p,
+    let svg_str = match svg_arg(svg) {
+        Some(s) => s,
         None => return ptr::null_mut(),
     };
-    let transform = usvg::Transform {
-        sx: scale,
-        kx: 0.0,
-        ky: 0.0,
-        sy: scale,
-        tx: 0.0,
-        ty: 0.0,
+    let (pixmap, pw, ph) = match render_tree(svg_str, fit_w, fit_h) {
+        Some(v) => v,
+        None => return ptr::null_mut(),
     };
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
 
     let png = match pixmap.encode_png() {
         Ok(p) => p,
         Err(_) => return ptr::null_mut(),
     };
 
-    let len = png.len();
-    let cap = png.capacity();
-    let ptr_out = png.as_ptr() as *mut u8;
-    std::mem::forget(png); // ownership transferred to the caller (via registry)
+    hand_out_buffer(png, out_len, out_w, out_h, pw, ph)
+}
 
-    *out_len = len as u32;
-    *out_w = pw;
-    *out_h = ph;
-    register_buffer(ptr_out, len, cap)
+/// Render `svg` to **premultiplied RGBA8** bytes: row-major, 4 bytes per pixel,
+/// exactly `width * height * 4` bytes total. Skips PNG encode/decode entirely so
+/// the Kotlin side can pack the pixels straight into a
+/// `BufferedImage(TYPE_INT_ARGB_PRE)` raster (tiny-skia already stores pixels
+/// premultiplied, so no per-pixel conversion is needed on little-endian JVMs).
+///
+/// `fit_w`/`fit_h` semantics are identical to [`svg_render_png_bytes`].
+/// Returns a heap-allocated buffer (free with [`svg_free_bytes`]) or null on failure.
+///
+/// # Safety
+/// `svg` must be a valid NUL-terminated UTF-8 string. `out_len`, `out_w`,
+/// `out_h` must be non-null.
+#[no_mangle]
+pub unsafe extern "C" fn svg_render_rgba_bytes(
+    svg: *const c_char,
+    fit_w: u32,
+    fit_h: u32,
+    out_len: *mut u32,
+    out_w: *mut u32,
+    out_h: *mut u32,
+) -> *mut u8 {
+    let svg_str = match svg_arg(svg) {
+        Some(s) => s,
+        None => return ptr::null_mut(),
+    };
+    let (pixmap, pw, ph) = match render_tree(svg_str, fit_w, fit_h) {
+        Some(v) => v,
+        None => return ptr::null_mut(),
+    };
+
+    hand_out_buffer(pixmap.data().to_vec(), out_len, out_w, out_h, pw, ph)
 }
 
 /// Extract the per-element layout of `svg` as a JSON string.
@@ -360,5 +419,53 @@ mod tests {
             assert_eq!(h, 120);
             svg_free_bytes(ptr);
         }
+    }
+
+    #[test]
+    fn renders_to_premultiplied_rgba() {
+        let c_svg = CString::new(SAMPLE).unwrap();
+        let mut len: u32 = 0;
+        let mut w: u32 = 0;
+        let mut h: u32 = 0;
+        let ptr = unsafe { svg_render_rgba_bytes(c_svg.as_ptr(), 0, 0, &mut len, &mut w, &mut h) };
+        assert!(!ptr.is_null(), "render should succeed");
+        assert_eq!(w, 200);
+        assert_eq!(h, 120);
+        unsafe {
+            let bytes = std::slice::from_raw_parts(ptr, len as usize);
+            assert_eq!(len, 200 * 120 * 4, "must be exactly w*h*4 RGBA bytes");
+
+            // Pixel sampler for row-major RGBA8.
+            let px = |x: u32, y: u32| -> [u8; 4] {
+                let o = ((y * 200 + x) * 4) as usize;
+                [bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]
+            };
+
+            // Interior pixels are far from edges -> no antialiasing, and since
+            // these colors are fully opaque, premultiplied == straight RGBA.
+            // bg: #fafafa at (5,5)
+            assert_eq!(px(5, 5), [0xfa, 0xfa, 0xfa, 0xff]);
+            // box-a: #4caf50 at (20,20)
+            assert_eq!(px(20, 20), [0x4c, 0xaf, 0x50, 0xff]);
+            // dot: #e91e63 at its center (150,60)
+            assert_eq!(px(150, 60), [0xe9, 0x1e, 0x63, 0xff]);
+
+            svg_free_bytes(ptr);
+        }
+    }
+
+    #[test]
+    fn rgba_respects_fit_bounds() {
+        let c_svg = CString::new(SAMPLE).unwrap();
+        let mut len: u32 = 0;
+        let mut w: u32 = 0;
+        let mut h: u32 = 0;
+        let ptr = unsafe { svg_render_rgba_bytes(c_svg.as_ptr(), 100, 60, &mut len, &mut w, &mut h) };
+        assert!(!ptr.is_null());
+        // Uniform fit inside 100x60 of a 200x120 viewBox -> scale 0.5 -> 100x60.
+        assert_eq!(w, 100);
+        assert_eq!(h, 60);
+        assert_eq!(len, 100 * 60 * 4);
+        unsafe { svg_free_bytes(ptr) };
     }
 }

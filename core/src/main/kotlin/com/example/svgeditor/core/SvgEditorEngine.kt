@@ -47,16 +47,35 @@ class SvgEditorEngine(
         svg = svgText
         renderW = 0
         renderH = 0
-        reload()
+        reloadLayout()
+        render()
         captureGeom()
     }
 
-    private fun reload() {
+    /**
+     * Load an SVG **without rasterizing it** — parse the source, extract the layout and capture
+     * the original geometry. The panel (which owns all raster production) immediately requests a
+     * content render through its own pipeline; the engine stays a fast, Swing-free source of
+     * truth for model + layout + edits.
+     */
+    fun loadLayoutOnly(svgText: String) {
+        svg = svgText
+        renderW = 0
+        renderH = 0
+        reloadLayout()
+        captureGeom()
+    }
+
+    /** Re-parse the layout from the current source. Never rasterizes. */
+    private fun reloadLayout() {
+        layout = SvgLayout.parse(renderer.layoutJson(svg))
+    }
+
+    private fun render() {
         val r = renderer.render(svg, renderW, renderH)
         png = r.png
         imageWidth = r.width
         imageHeight = r.height
-        layout = SvgLayout.parse(renderer.layoutJson(svg))
     }
 
     /**
@@ -75,44 +94,6 @@ class SvgEditorEngine(
         png = r.png
         imageWidth = r.width
         imageHeight = r.height
-    }
-
-    // ---- layered rendering (smooth, resvg-free drag preview) -------------------
-    var bgPng: ByteArray = ByteArray(0)
-        private set
-    var fgPng: ByteArray = ByteArray(0)
-        private set
-
-    /**
-     * Build two cached rasters so dragging never re-rasterizes with resvg:
-     *  - `bgPng`: every element EXCEPT [id] (the dragged element is composited separately).
-     *  - `fgPng`: ONLY [id] visible.
-     * During a drag the panel just blits `bgPng` (static) and offsets/scales `fgPng`, giving a
-     * 60fps follow-cursor feel instead of the old "yellow preview box only" jank.
-     */
-    fun selectForEditing(id: String) {
-        if (id.isBlank()) {
-            clearLayers()
-            return
-        }
-        val w = if (renderW > 0) renderW else imageWidth
-        val h = if (renderH > 0) renderH else imageHeight
-        if (w <= 0 || h <= 0) {
-            clearLayers()
-            return
-        }
-        val bgSvg = SvgUtils.hideElement(svg, id)
-        // Solo the selected element (keep it + its ancestor groups) so a nested element is not
-        // hidden along with an ancestor group. This keeps the foreground layer correct for
-        // elements inside <g> containers — fixing "drag preview vanishes for grouped elements".
-        val fgSvg = SvgUtils.soloElement(svg, id)
-        bgPng = renderer.render(bgSvg, w, h).png
-        fgPng = renderer.render(fgSvg, w, h).png
-    }
-
-    fun clearLayers() {
-        bgPng = ByteArray(0)
-        fgPng = ByteArray(0)
     }
 
     private fun captureGeom() {
@@ -162,7 +143,7 @@ class SvgEditorEngine(
         val updated = SvgUtils.prependMatrix(svg, id, pStr)
         if (updated == svg) return false
         svg = updated
-        reload()
+        reloadLayout()
         return true
     }
 
@@ -182,7 +163,7 @@ class SvgEditorEngine(
         val updated = SvgUtils.prependRotate(svg, id, angleDeg, cx, cy)
         if (updated == svg) return false
         svg = updated
-        reload()
+        reloadLayout()
         return true
     }
 
@@ -220,7 +201,7 @@ class SvgEditorEngine(
         val updated = SvgUtils.prependMatrix(svg, id, attr)
         if (updated == svg) return false
         svg = updated
-        reload()
+        reloadLayout()
         return true
     }
 }

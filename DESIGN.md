@@ -21,39 +21,42 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  IntelliJ IDEA                                                 │
+│  IntelliJ IDEA / 独立 app                                     │
 │                                                                │
-│   SvgEditorToolWindowFactory  ── 加载 resvg_bridge (.dll)       │
-│        │                                                       │
+│   SvgEditorToolWindowFactory / AppMain                         │
+│        │  SvgEditorPanel(asyncRendering = true) + dispose      │
 │        ▼                                                       │
-│   SvgEditorPanel (Swing/JPanel)                                │
-│     · 离屏 canvas (BufferedImage) = resvg 渲染结果              │
-│     · MouseMotionListener / MouseListener                      │
-│     · 坐标映射 (panel ↔ SVG) + 碰撞检测 + 拖拽编辑              │
+│   SvgEditorPanel (Swing)                                       │
+│     · EDT 只做 blit 与浮点矢量覆盖层（选中框/手柄/marquee）      │
+│     · RenderScheduler：单后台渲染线程，latest-wins             │
+│     · 鼠标/键盘 → InteractionController → 引擎零光栅化提交      │
 └───────────────────────────┬──────────────────────────────────┘
                              │ 使用
                              ▼
 ┌──────────────────────────────────────────────────────────────┐
 │  core (Kotlin/JVM, 无 IntelliJ 依赖, 可独立单测)                │
-│   SvgEditorEngine ── SvgRenderer (接口)                         │
+│   SvgEditorEngine ── 模型 + 布局 + 编辑（不产光栅）              │
+│   RenderScheduler（异步队列）· RgbaImages（RGBA 直接打包）       │
+│   EditorTheme（LeaferJS 视觉常量）                              │
 │   CollisionDetector · InteractionController                    │
-│   SvgLayout / SvgElement · Json (解析) · SvgUtils (改写源码)    │
+│   SvgLayout / SvgElement · Json · SvgUtils                     │
 │   SvgEditorPanel (纯 Swing，便于无 SDK 单测)                    │
 └───────────────────────────┬──────────────────────────────────┘
                              │ JNA
                              ▼
 ┌──────────────────────────────────────────────────────────────┐
 │  resvg_bridge (Rust cdylib)   ←── cargo build  ── resvg + usvg  │
-│   svg_render_png_bytes()  → PNG 字节 (离屏 canvas 源)           │
+│   svg_render_rgba_bytes() → 预乘 RGBA8（跳过 PNG 编解码）       │
+│   svg_render_png_bytes()  → PNG 字节（兼容路径）                │
 │   svg_layout_json()       → 每个元素的 id / 绝对包围盒 / 矩阵    │
 └──────────────────────────────────────────────────────────────┘
 ```
 
 数据流向：
-`SVG 文本 → resvg_bridge.render → PNG 字节 → 离屏 BufferedImage`
+`SVG 文本 → resvg_bridge.svg_render_rgba_bytes → 预乘 RGBA8 → RgbaImages.fromRgba（TYPE_INT_ARGB_PRE，零 PNG 往返）→ 离屏 BufferedImage`
 `SVG 文本 → resvg_bridge.layout_json → JSON → SvgLayout(包围盒列表)`
-`鼠标坐标 → 坐标映射 → CollisionDetector.hitTest → hover/选中`
-`拖拽 → InteractionController → SvgUtils.applyTranslate → 改写源码 → 重新 render`
+`鼠标坐标 → 坐标映射 → CollisionDetector.hitTest → hover/选中/框选`
+`拖拽 → InteractionController(EditResult) → 引擎 reloadLayout（仅重算布局）→ 提交时面板后台重渲`
 
 ---
 
@@ -67,8 +70,9 @@
 
 | 函数 | 作用 |
 | --- | --- |
-| `svg_render_png_bytes(svg, fitW, fitH, *len, *w, *h) -> *u8` | 渲染 SVG 为 **PNG 字节**（离屏 canvas 的源）。`fitW/fitH=0` 按原始尺寸。 |
-| `svg_free_bytes(ptr)` | 释放上者返回的缓冲区（用全局注册表记录 len/cap）。 |
+| `svg_render_rgba_bytes(svg, fitW, fitH, *len, *w, *h) -> *u8` | 渲染为 **预乘 RGBA8** 像素缓冲（跳过 PNG 编码，编辑器主管线）。`fitW/fitH=0` 按原始尺寸。 |
+| `svg_render_png_bytes(svg, fitW, fitH, *len, *w, *h) -> *u8` | 渲染为 **PNG 字节**（兼容/调试路径）。 |
+| `svg_free_bytes(ptr)` | 释放上两者返回的缓冲区（用全局注册表记录 len/cap）。 |
 | `svg_layout_json(svg) -> *char` | 返回 JSON：文档宽高 + 每个元素的 `index/id/kind/x/y/width/height/transform`。 |
 | `svg_free_string(s) -> void` | 释放上者返回的字符串。 |
 
@@ -88,15 +92,18 @@
 
 | 类名 | 职责 |
 | --- | --- |
-| `SvgRenderer` (接口) | 渲染 + 布局抽象；`ResvgBridge` 是生产实现，`FakeSvgRenderer` 用于测试。 |
+| `SvgRenderer` (接口) | 渲染 + 布局抽象；`renderRgba`（预乘 RGBA，主管线）与 `render`（PNG，兼容）；`ResvgBridge` 是生产实现，`FakeSvgRenderer` 用于测试。 |
 | `ResvgBridge` | JNA 封装：UTF-8+NUL 编码入参，拷贝出参后立刻释放原生内存。 |
+| `RgbaImages` | 把预乘 RGBA8 字节直接打包为 `TYPE_INT_ARGB_PRE` 的 `BufferedImage`——零 PNG 编解码往返。 |
+| `RenderScheduler` | 单后台渲染线程的任务队列（CONTENT / LAYERS 两个槽位，latest-wins；可同步内联模式供测试）。 |
 | `SvgLayout` / `SvgElement` | 布局数据模型；`hitTest` / `intersecting` 命中查询。 |
 | `Json` | 极简 JSON 解析器（仅支持本 schema 所需子集，零依赖）。 |
 | `CollisionDetector` | 碰撞检测：点命中（取最上层）、矩形相交（框选）、元素两两重叠。 |
-| `InteractionController` | 鼠标交互状态机：`IDLE / HOVER / DRAG`，产生拖拽增量 `DragResult`。 |
-| `SvgUtils` | 源码级编辑：给目标 `id` 的元素插入/叠加 `transform="translate(dx,dy)"`。 |
-| `SvgEditorEngine` | 引擎：持有 SVG 源码为唯一真相，调用 `render`+`layoutJson` 刷新，提供 `moveElement`。 |
-| `SvgEditorPanel` (Swing) | 编辑器面板（见第 5、6 节）。 |
+| `InteractionController` | 鼠标交互状态机（hover/拖动/缩放/旋转，含 snap），产出 `EditResult.Move/Resize/Rotate`。 |
+| `SvgUtils` | 源码级编辑：`translate`/`rotate`/`matrix` 变换叠加，以及 `hideElement` / `soloElement`（分层渲染源构建）。 |
+| `SvgEditorEngine` | 引擎：持有 SVG 源码为唯一真相。`load`/`renderAt` 全量渲染；`loadLayoutOnly` 与 `reloadLayout` 只重算布局不产光栅——拖拽提交零光栅化。 |
+| `EditorTheme` | LeaferJS 风格视觉常量（主色 #836DFF、手柄、marquee、snap 色），宿主可统一换肤。 |
+| `SvgEditorPanel` (Swing) | 编辑器面板（见第 6、7、11 节）。 |
 
 `core` **不依赖 IntelliJ API**，因此可在普通 JVM 上用 Gradle/JUnit 直接跑单测。
 
@@ -113,52 +120,96 @@
 
 ---
 
-## 6. 离屏 canvas 与坐标映射（需求 3）
+## 6. 渲染管线与坐标映射（需求 3）
 
-`SvgEditorPanel` 把 `resvg` 渲染出的 PNG 解码为离屏 `BufferedImage`（即“离屏 canvas”），
-在 `paintComponent` 里用 `g.drawImage` 把它合成到可见面板。`MouseMotionListener`
-监听指针位置，做两件事：
+### 6.1 异步管线（卡顿治理）
 
-1. **坐标映射**：`panel 像素 → SVG/canvas 坐标`（`toImage`：去掉偏移并按 `viewScale` 缩放）。
-2. **碰撞检测**：用映射后的坐标调用 `CollisionDetector.hitTest`，得到指针下方的元素，
-   画高亮框 + tooltip（元素 `id` 与类型）。
+旧实现把 PNG 解码/光栅化都压在 EDT 上（加载、按下选中、滚轮缩放各渲一次），大文档必卡。
+重构后职责重新划分：
 
-拖拽过程中还会画一个半透明的“幽灵”矩形，预览元素移动后的位置——同样基于布局包围盒与
-拖拽增量，验证了“用布局信息做碰撞检测 / 离屏 canvas”的路线。
+- **渲染只发生在后台**：`RenderScheduler`（单线程，latest-wins）持有 CONTENT（整图）与
+  LAYERS（分层）两类任务；新请求替换同槽位旧任务，永不排队堆积。EDT 只做
+  `g.drawImage` blit 与矢量覆盖层绘制。
+- **零 PNG 往返**：Rust 侧 `svg_render_rgba_bytes` 产出预乘 RGBA8，
+  `RgbaImages.fromRgba` 直接打包为 `TYPE_INT_ARGB_PRE` 位图。
+- **失效守卫**：任务携带 `RenderTag`/`LayerTag`（svg 源引用 + 尺寸），回帖时做引用相等
+  校验，过期结果直接丢弃。
+- **缩放节流**：滚轮先重采样旧位图即时反馈，160 ms `javax.swing.Timer` 后台重渲清晰版。
+- **hover 预热**：悬停 120 ms 后预取该元素的分层（bg/fg 两渲一个 LAYERS 任务成对返回），
+  按下拖拽时层已就绪，拖动全程零光栅化。
+- **分层合成**：选中元素时面板用 `SvgUtils.hideElement`（隐藏目标）渲背景层、
+  `soloElement`（仅目标+祖先链）渲前景层；拖动中只把裁剪后的小图 `fgCrop` 用浮点
+  `AffineTransform` 贴到预览框，拖拽→释放表示法一致，无“落地闪跳”。
+
+### 6.2 坐标映射
+
+`panel 像素 → SVG/canvas 坐标`（`toImage`：去掉偏移并按 `viewScale` 缩放），命中测试用
+`CollisionDetector.hitTest`；空白处按下拖拽为 marquee 框选（`intersecting` 取最上层）。
 
 ---
 
 ## 7. 拖拽编辑（需求 1）
 
-- 鼠标按下：若指针命中某元素，则 `InteractionController` 进入 `DRAG` 并记下起点。
-- 拖拽中：累计相对起点的位移 `(dx, dy)`（画布坐标）。
-- 释放：`engine.moveElement(id, dx, dy)` → `SvgUtils.applyTranslate` 在 SVG 源码里给该
-  元素叠加 `transform="translate(dx,dy)"` → 重新 `render` + 重新 `layoutJson` → 离屏 canvas
-  与布局同步刷新。
+- **按下**：命中旋转手柄 → 旋转；命中元素 → `InteractionController` 进入拖拽并请求分层；
+  空白处 → 进入 marquee。
+- **拖拽中**：`onDragMove` 产出带 snap 的 `previewBox` / `previewAngle`，面板贴 fgCrop +
+  重绘覆盖层，全程不触碰 resvg。
+- **释放**：`EditResult.Move/Resize/Rotate` → 引擎 `moveElement`/`setElementBox`/
+  `rotateElement` 以 `reloadLayout` 提交（只重算布局，不渲染）→ 面板后台重渲 CONTENT 与
+  LAYERS → 提交结果与最后一帧预览逐像素一致。
 
 因为“唯一真相”是 SVG 文本，编辑结果天然可被任意 SVG 工具继续处理。
 
 ---
 
-## 8. 测试策略（需求 4）
+## 8. 交互与视觉（LeaferJS 化重构）
+
+**视觉**（全部集中在 `EditorTheme`，主色 LeaferJS 紫 `#836DFF`）：
+
+- hover：半透明主色圆角描边（浮点 `RoundRectangle2D`，不再整数截断）。
+- 选中：浮点 `Path2D` 旋转轮廓 + 8 个圆点手柄（`Ellipse2D`，白底主色描边）+
+  顶部旋转杆与圆握把，替换旧的整型线段/方块手柄。
+- 对齐参考线：Figma 风格红粉 `#FF3B5C`。
+- 框选（marquee）：虚线主色边框 + 半透明填充；已移除旧十字准星。
+
+**交互**：
+
+- 空白处按下拖拽 = marquee 框选，释放时选中 `intersecting(...).lastOrNull()`（最上层）；
+  <3 px 视为点击取消。
+- 中键或按住 **空格** 拖拽 = 画布平移（操作 viewport，缩放锚点跟随光标）。
+- 滚轮缩放带锚点 + 160 ms 节流重渲；Ctrl+滚轮保留语义。
+- 光标随上下文切换（平移手型 / 缩放手柄 / 可拖 MOVE）。
+
+**宿主适配**：
+
+- 独立 app 与 IDEA 插件统一以 `SvgEditorPanel(renderer, asyncRendering = true)` 运行异步
+  管线；测试与 headless 校验用默认同步模式（确定性）。
+- 生命周期：app 窗口关闭 `panel.dispose()`；插件 ToolWindow 用 `Content.setDisposer`、
+  `SvgPreviewPanel`（FileEditor）在 `dispose()` 释放渲染线程与计时器。
+
+---
+
+## 9. 测试策略（需求 4）
 
 | 测试 | 文件 | 是否需要原生/SDK |
 | --- | --- | --- |
-| Rust 单元/集成测试（渲染 + 布局提取） | `native/resvg_bridge/src/lib.rs` `#[cfg(test)]` | 需要 cargo（自带） |
+| Rust 单元/集成测试（渲染 + 布局提取 + RGBA 输出） | `native/resvg_bridge/src/lib.rs` `#[cfg(test)]` | 需要 cargo（自带） |
 | `SvgLayoutTest` | `core/src/test` | 否 |
 | `CollisionDetectorTest` | `core/src/test` | 否 |
 | `InteractionControllerTest` | `core/src/test` | 否 |
 | `SvgUtilsTest` | `core/src/test` | 否 |
 | `EngineFakeRendererTest` | `core/src/test` | 否（FakeSvgRenderer） |
+| `RenderSchedulerTest` | `core/src/test` | 否（同步内联 + 线程队列语义） |
+| `RgbaImagesTest` | `core/src/test` | 否（RGBA 打包正确性） |
 | `SvgEditorPanelTest` | `core/src/test` | 否（FakeSvgRenderer + 合成鼠标事件） |
-| `ResvgIntegrationTest` | `core/src/test` | **需要** `resvg_bridge.dll`，否则自动跳过 |
+| `ResvgIntegrationTest` | `core/src/test` | **需要** `resvg_bridge` 动态库，否则自动跳过 |
 
 纯逻辑测试不依赖任何原生库，保证 CI 无 Rust 工具链也能绿；集成测试在 `cargo build`
 之后跑完整 `render → layout → 碰撞 → 编辑` 闭环。
 
 ---
 
-## 9. 构建与运行
+## 10. 构建与运行
 
 ```bash
 # 1) 原生库（产出 resvg_bridge.dll）
@@ -179,7 +230,7 @@ cargo build --release # 产出 target/release/resvg_bridge.dll
 
 ---
 
-## 10. 文件结构
+## 11. 文件结构
 
 ```
 svg-editor-plugin/

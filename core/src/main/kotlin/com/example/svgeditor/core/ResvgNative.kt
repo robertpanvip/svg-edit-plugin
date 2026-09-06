@@ -23,6 +23,15 @@ interface ResvgLibrary : Library {
         outH: IntByReference,
     ): Pointer
 
+    fun svg_render_rgba_bytes(
+        svg: ByteArray,
+        fitW: Int,
+        fitH: Int,
+        outLen: IntByReference,
+        outW: IntByReference,
+        outH: IntByReference,
+    ): Pointer
+
     fun svg_free_bytes(ptr: Pointer)
 
     fun svg_layout_json(svg: ByteArray): Pointer
@@ -58,15 +67,39 @@ class ResvgBridge private constructor(
         fitW: Int,
         fitH: Int,
     ): RenderResult {
+        val (data, w, h) = callRender(svg, fitW, fitH) { b, fw, fh, l, ow, oh ->
+            lib.svg_render_png_bytes(b, fw, fh, l, ow, oh)
+        }
+        return RenderResult(data, w, h)
+    }
+
+    /** Render `svg` to raw premultiplied RGBA8 bytes (no PNG encode/decode). */
+    override fun renderRgba(
+        svg: String,
+        fitW: Int,
+        fitH: Int,
+    ): RgbaResult {
+        val (data, w, h) = callRender(svg, fitW, fitH) { b, fw, fh, l, ow, oh ->
+            lib.svg_render_rgba_bytes(b, fw, fh, l, ow, oh)
+        }
+        return RgbaResult(data, w, h)
+    }
+
+    private inline fun callRender(
+        svg: String,
+        fitW: Int,
+        fitH: Int,
+        call: (ByteArray, Int, Int, IntByReference, IntByReference, IntByReference) -> Pointer,
+    ): Triple<ByteArray, Int, Int> {
         val bytes = svg.toByteArray(Charsets.UTF_8) + 0.toByte()
         val outLen = IntByReference()
         val outW = IntByReference()
         val outH = IntByReference()
-        val ptr = lib.svg_render_png_bytes(bytes, fitW, fitH, outLen, outW, outH)
+        val ptr = call(bytes, fitW, fitH, outLen, outW, outH)
         require(ptr != Pointer.NULL) { "resvg_bridge: render failed (invalid SVG or native error)" }
         val data = ptr.getByteArray(0, outLen.value)
         lib.svg_free_bytes(ptr)
-        return RenderResult(data, outW.value, outH.value)
+        return Triple(data, outW.value, outH.value)
     }
 
     /** Extract the per-element layout JSON for `svg`. */

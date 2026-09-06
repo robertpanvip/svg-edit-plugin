@@ -19,5 +19,12 @@ class FakeSvgRenderer : SvgRenderer {
         fitH: Int,
     ): RenderResult = RenderResult(png, 1, 1)
 
+    // 1x1 transparent premultiplied RGBA pixel (matches the static PNG above).
+    override fun renderRgba(
+        svg: String,
+        fitW: Int,
+        fitH: Int,
+    ): RgbaResult = RgbaResult(ByteArray(4), 1, 1)
+
     override fun layoutJson(svg: String): String = Samples.LAYOUT_JSON
 }
