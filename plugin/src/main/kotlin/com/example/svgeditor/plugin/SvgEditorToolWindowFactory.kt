@@ -4,7 +4,7 @@ import com.example.svgeditor.core.Samples
 import com.example.svgeditor.core.SvgEditorPanel
 import com.example.svgeditor.core.createEditorToolbar
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.util.Disposable
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.ui.content.ContentFactory
