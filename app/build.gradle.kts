@@ -38,12 +38,36 @@ val stageJars by tasks.registering(Sync::class) {
     into(stageDir)
 }
 
+val isWindows = System.getProperty("os.name").contains("Windows", ignoreCase = true)
+
 val jpackageBin =
     run {
-        val name = if (System.getProperty("os.name").contains("Windows", ignoreCase = true)) "jpackage.exe" else "jpackage"
+        val name = if (isWindows) "jpackage.exe" else "jpackage"
         val inJdk = File(System.getProperty("java.home"), "bin/$name")
         if (inJdk.exists()) inJdk.absolutePath else name
     }
+
+// Bundle the native resvg bridge inside app.jar (resource `native/<lib>`), mirroring the
+// plugin's wiring: `loadRenderer()` extracts it to a temp file and loads by absolute path,
+// which is what makes the jpackage image self-contained.
+val nativeFileName = when {
+    isWindows -> "resvg_bridge.dll"
+    System.getProperty("os.name").lowercase().contains("mac") -> "libresvg_bridge.dylib"
+    else -> "libresvg_bridge.so"
+}
+val nativeTarget = rootDir.resolve("native/resvg_bridge/target")
+
+val buildNative by tasks.registering(Exec::class) {
+    group = "distribution"
+    description = "cargo build --release the resvg_bridge cdylib bundled into app.jar."
+    workingDir = rootDir.resolve("native/resvg_bridge")
+    commandLine("cargo", "build", "--release")
+}
+
+tasks.jar {
+    dependsOn(buildNative)
+    from(nativeTarget.resolve("release").resolve(nativeFileName)) { into("native") }
+}
 
 // `./gradlew :app:packageExe` -> build/SvgEditor/SvgEditor.exe (bundled JRE, self-contained).
 val packageExe by tasks.registering(Exec::class) {
@@ -54,7 +78,7 @@ val packageExe by tasks.registering(Exec::class) {
         // jpackage aborts if the target image directory already exists.
         delete(layout.buildDirectory.dir("dist/SvgEditor"))
     }
-    commandLine(
+    val jpackageArgs = mutableListOf(
         jpackageBin,
         "--name", "SvgEditor",
         "--input", stageDir.get().asFile.absolutePath,
@@ -64,9 +88,11 @@ val packageExe by tasks.registering(Exec::class) {
         "--dest", layout.buildDirectory.dir("dist").get().asFile.absolutePath,
         "--app-version", "0.1.0",
         "--vendor", "svg-editor",
-        "--win-console",
         "--add-modules", "ALL-MODULE-PATH",
     )
+    // `--win-console` is a Windows-only jpackage option.
+    if (isWindows) jpackageArgs += "--win-console"
+    commandLine(jpackageArgs)
 }
 
 // Zip the app image for easy sharing: build/dist/SvgEditor.zip
