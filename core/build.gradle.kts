@@ -3,7 +3,7 @@ plugins {
 }
 
 group = "com.example.svgeditor"
-version = "0.2.0"
+version = "0.2.1"
 
 repositories {
     mavenCentral()
@@ -11,7 +11,11 @@ repositories {
 
 dependencies {
     // JNA is used to call the resvg native bridge (resvg_bridge.dll / .so).
-    implementation("net.java.dev.jna:jna:5.14.0")
+    // compileOnly: the IntelliJ Platform ships its own JNA (lib/util-8.jar) and plugins must
+    // NOT bundle a copy — the platform loader then hides ours and com.sun.jna.Native fails to
+    // initialize ("Unable to locate JNA native support library" at runtime). Tests still need it.
+    compileOnly("net.java.dev.jna:jna:5.14.0")
+    testImplementation("net.java.dev.jna:jna:5.14.0")
 
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
