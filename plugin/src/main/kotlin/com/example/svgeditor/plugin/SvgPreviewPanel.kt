@@ -20,7 +20,9 @@ import java.awt.BorderLayout
 import java.beans.PropertyChangeListener
 import java.util.concurrent.CopyOnWriteArrayList
 import javax.swing.JComponent
+import javax.swing.JLabel
 import javax.swing.JPanel
+import javax.swing.SwingConstants
 
 /**
  * Right-hand side of the [SvgPreviewEditor]: an interactive design canvas bound to the same
@@ -61,11 +63,13 @@ class SvgPreviewPanel(
             }
         }
 
+    private val toolbar: JComponent? = panel?.let { createEditorToolbar(it, IdeaIconResolver) }
+
     private val documentListener =
         object : DocumentListener {
             override fun documentChanged(event: DocumentEvent) {
                 if (suppressReload) return
-                panel?.loadSvg(event.document.text)
+                loadSafely(event.document.text)
             }
 
             override fun beforeDocumentChange(event: DocumentEvent) {
@@ -74,18 +78,60 @@ class SvgPreviewPanel(
         }
 
     init {
-        val canvas = panel
-        if (canvas != null) {
-            val toolbar = createEditorToolbar(canvas, IdeaIconResolver)
-            add(toolbar, BorderLayout.NORTH)
-            add(canvas, BorderLayout.CENTER)
-
-            document?.text?.let { canvas.loadSvg(it) }
+        if (panel != null) {
+            // document can be null for exotic VFS states; fall back to the raw file bytes.
+            fileText()?.let { loadSafely(it) } ?: showCanvas()
         } else {
             add(NativeLibGuidePanel(SvgBridgeLoader.describeAttempts()), BorderLayout.CENTER)
         }
         document?.addDocumentListener(documentListener)
     }
+
+    /** Document text when available, else the file bytes; null when neither is readable. */
+    private fun fileText(): String? =
+        document?.text
+            ?: runCatching { String(file.contentsToByteArray(), Charsets.UTF_8) }.getOrNull()
+
+    /** [SvgEditorPanel.loadSvg] that never throws: parse failures become a visible notice. */
+    private fun loadSafely(text: String) {
+        val canvas = panel ?: return
+        try {
+            canvas.loadSvg(text)
+            showCanvas()
+        } catch (t: Throwable) {
+            showParseError(t)
+        }
+    }
+
+    private fun showCanvas() {
+        val canvas = panel ?: return
+        if (canvas.parent === this && (toolbar == null || toolbar.parent === this)) return
+        removeAll()
+        toolbar?.let { add(it, BorderLayout.NORTH) }
+        add(canvas, BorderLayout.CENTER)
+        revalidate()
+        repaint()
+    }
+
+    private fun showParseError(t: Throwable) {
+        val detail = escapeHtml((t.message ?: t.javaClass.simpleName)).take(200)
+        removeAll()
+        add(
+            JLabel(
+                "<html><b>This SVG could not be rendered by SvgEasy</b><br>" +
+                    "<span style=\"color:#888888\">$detail</span></html>",
+            ).apply {
+                horizontalAlignment = SwingConstants.CENTER
+                verticalAlignment = SwingConstants.CENTER
+            },
+            BorderLayout.CENTER,
+        )
+        revalidate()
+        repaint()
+    }
+
+    private fun escapeHtml(s: String): String =
+        s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
     private fun writeBack() {
         val doc = document ?: return
