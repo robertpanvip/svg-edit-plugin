@@ -614,9 +614,25 @@ class SvgEditorPanel(
         )
 
         canvas.addMouseWheelListener { e ->
-            val f = if (e.wheelRotation < 0) 1.1 else 1.0 / 1.1
-            zoomBy(f, e.x.toDouble(), e.y.toDouble())
+            // Zoom only when Ctrl (⌘ on macOS) is held; otherwise the wheel scrolls the
+            // viewport like a normal editor. Unconditional zoom made plain scrolling zoom in
+            // unexpectedly.
+            if (e.isControlDown || e.isMetaDown) {
+                e.consume()
+                val f = if (e.wheelRotation < 0) 1.1 else 1.0 / 1.1
+                zoomBy(f, e.x.toDouble(), e.y.toDouble())
+            } else {
+                scrollViewportByWheel(e)
+            }
         }
+    }
+
+    /** Plain wheel = scroll the preview viewport (Shift = horizontal), mirroring a normal editor. */
+    private fun scrollViewportByWheel(e: MouseWheelEvent) {
+        val bar =
+            if (e.isShiftDown) scrollPane.horizontalScrollBar else scrollPane.verticalScrollBar
+        val delta = e.wheelRotation * e.scrollAmount * 3
+        bar.value = (bar.value + delta).coerceIn(bar.minimum, bar.maximum - bar.visibleAmount)
     }
 
     private fun installKeys() {
