@@ -2,6 +2,7 @@ package com.example.svgeditor.plugin
 
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.fileEditor.FileEditor
 import com.intellij.openapi.fileEditor.FileEditorLocation
 import com.intellij.openapi.fileEditor.FileEditorState
@@ -15,11 +16,15 @@ import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.components.AnActionLink
 import java.awt.BorderLayout
 import java.awt.Dimension
+import java.awt.event.ComponentAdapter
+import java.awt.event.ComponentEvent
 import java.beans.PropertyChangeListener
 import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.JSplitPane
 import javax.swing.SwingUtilities
+
+private val LOG = Logger.getInstance("SvgEasy")
 
 /**
  * Editor that shows the SVG source (a standard [TextEditor], left) side-by-side with the
@@ -49,6 +54,8 @@ class SvgPreviewEditor(
         TextEditorProvider.getInstance().createEditor(project, file) as TextEditor
     private val preview = createPreviewSafely(project, file)
 
+    private var mode = Mode.SPLIT
+
     private val split =
         JSplitPane(JSplitPane.HORIZONTAL_SPLIT, textEditor.component, preview.component).apply {
             isContinuousLayout = true
@@ -61,7 +68,30 @@ class SvgPreviewEditor(
             add(buildTabToolbar(), BorderLayout.NORTH)
             add(split, BorderLayout.CENTER)
             preferredSize = Dimension(960, 560)
+            minimumSize = Dimension(320, 240)
+            addComponentListener(
+                object : ComponentAdapter() {
+                    override fun componentShown(e: ComponentEvent) = enforceSplitLayout("shown")
+                    override fun componentResized(e: ComponentEvent) = enforceSplitLayout("resized")
+                },
+            )
         }
+
+    private fun enforceSplitLayout(reason: String) {
+        LOG.info(
+            "editor: $reason split=${split.width}x${split.height} divider=${split.dividerLocation} " +
+                "mode=$mode left=${textEditor.component.width}x${textEditor.component.height} " +
+                "right=${preview.component.width}x${preview.component.height}",
+        )
+        if (mode == Mode.SPLIT && split.isShowing && split.width > 0) {
+            SwingUtilities.invokeLater {
+                split.setDividerLocation(0.5)
+                root.revalidate()
+                root.repaint()
+                LOG.info("editor: divider reapplied -> ${split.dividerLocation} (w=${split.width})")
+            }
+        }
+    }
 
     /** The compositional view modes exposed on the tab by the toolbar. */
     private enum class Mode { SOURCE, SPLIT, PREVIEW }
@@ -140,8 +170,9 @@ class SvgPreviewEditor(
 /** Builds the preview panel, degrading to [SvgEasyFallbackPanel] instead of throwing. */
 private fun createPreviewSafely(project: Project, file: VirtualFile): FileEditor =
     try {
-        SvgPreviewPanel(project, file)
+        SvgPreviewPanel(project, file).also { LOG.info("editor: preview created: SvgPreviewPanel") }
     } catch (t: Throwable) {
+        LOG.warn("editor: SvgPreviewPanel failed, using fallback", t)
         SvgEasyFallbackPanel(t)
     }
 

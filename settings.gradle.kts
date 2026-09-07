@@ -1,5 +1,14 @@
 rootProject.name = "svg-editor-plugin"
 
+// Tencent mirrors first for faster dependency resolution (plugin marker + Gradle plugins).
+pluginManagement {
+    repositories {
+        maven("https://mirrors.cloud.tencent.com/nexus/repository/maven-public/")
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
 include("core")
 include("app")
 

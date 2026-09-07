@@ -3,6 +3,7 @@ package com.example.svgeditor.plugin
 import com.example.svgeditor.core.SvgEditorPanel
 import com.example.svgeditor.core.SvgRenderer
 import com.intellij.openapi.command.WriteCommandAction
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.event.DocumentEvent
 import com.intellij.openapi.editor.event.DocumentListener
@@ -26,6 +27,8 @@ import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.SwingConstants
 import kotlin.math.roundToInt
+
+private val LOG = Logger.getInstance("SvgEasy")
 
 /**
  * Right-hand side of the [SvgPreviewEditor]: an interactive design canvas bound to the same
@@ -138,6 +141,7 @@ class SvgPreviewPanel(
             canvas.loadSvg(text)
             showCanvas()
         } catch (t: Throwable) {
+            LOG.warn("preview: loadSvg failed", t)
             showParseError(t)
         }
     }

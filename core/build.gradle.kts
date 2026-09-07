@@ -6,6 +6,7 @@ group = "com.example.svgeditor"
 version = "0.3.2"
 
 repositories {
+    maven("https://mirrors.cloud.tencent.com/nexus/repository/maven-public/")
     mavenCentral()
 }
 

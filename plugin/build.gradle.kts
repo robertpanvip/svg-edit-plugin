@@ -4,9 +4,10 @@ plugins {
 }
 
 group = "com.example.svgeditor"
-version = "0.3.3"
+version = "0.3.4"
 
 repositories {
+    maven("https://mirrors.cloud.tencent.com/nexus/repository/maven-public/")
     mavenCentral()
     intellijPlatform {
         // Recommended default repo set (mavenCentral + jetbrainsIdeInstallers + marketplace + ...).

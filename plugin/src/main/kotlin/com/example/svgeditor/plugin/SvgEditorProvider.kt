@@ -1,5 +1,6 @@
 package com.example.svgeditor.plugin
 
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.fileEditor.FileEditor
 import com.intellij.openapi.fileEditor.FileEditorPolicy
 import com.intellij.openapi.fileEditor.FileEditorProvider
@@ -18,6 +19,8 @@ import com.intellij.openapi.vfs.VirtualFile
  * registration to `order="first"`.
  */
 class SvgEditorProvider : FileEditorProvider, DumbAware {
+    private val log = Logger.getInstance("SvgEasy")
+
     override fun accept(
         project: Project,
         file: VirtualFile,
@@ -29,8 +32,10 @@ class SvgEditorProvider : FileEditorProvider, DumbAware {
         file: VirtualFile,
     ): FileEditor =
         try {
-            SvgPreviewEditor(project, file)
+            log.info("provider: creating SvgPreviewEditor for ${file.name}")
+            SvgPreviewEditor(project, file).also { log.info("provider: SvgPreviewEditor created for ${file.name}") }
         } catch (t: Throwable) {
+            log.warn("provider: SvgPreviewEditor construction failed, using fallback", t)
             SvgEasyFallbackPanel(t)
         }
 
