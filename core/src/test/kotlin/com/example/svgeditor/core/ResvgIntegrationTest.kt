@@ -94,14 +94,24 @@ class ResvgIntegrationTest {
         assertTrue(engine.svg.contains("matrix("), "resize should emit a matrix(...) transform")
     }
 
+    private fun nativeLibName(): String {
+        val os = System.getProperty("os.name").lowercase()
+        return when {
+            os.contains("win") -> "resvg_bridge.dll"
+            os.contains("mac") || os.contains("darwin") -> "libresvg_bridge.dylib"
+            else -> "libresvg_bridge.so"
+        }
+    }
+
     private fun findNativeLibrary(): Path? {
         val base = Paths.get(System.getProperty("user.dir"), "..", "native", "resvg_bridge", "target")
-        val names = listOf("resvg_bridge.dll", "libresvg_bridge.so", "libresvg_bridge.dylib")
+        // Only look for the library matching the CURRENT OS: CI drops all three platform
+        // libs into the same directory, and blindly probing e.g. the Windows dll on Linux
+        // makes JNA throw UnsatisfiedLinkError instead of skipping.
+        val name = nativeLibName()
         for (profile in listOf("debug", "release")) {
-            for (name in names) {
-                val p = base.resolve(profile).resolve(name)
-                if (Files.exists(p)) return p
-            }
+            val p = base.resolve(profile).resolve(name)
+            if (Files.exists(p)) return p
         }
         return null
     }
