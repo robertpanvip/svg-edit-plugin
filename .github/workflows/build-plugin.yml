@@ -38,11 +38,29 @@ jobs:
         working-directory: native/resvg_bridge
         run: cargo build --release
 
-      - name: Upload native artifacts
+      # Upload ONLY the platform's cdylib so the plugin job can bundle all three
+      # platform libs into one cross-platform plugin zip (uploading the whole
+      # target/release/ dir would drag in multi-GB build intermediates).
+      - name: Upload native artifact (Linux)
+        if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
           name: native-lib-${{ matrix.os }}
-          path: native/resvg_bridge/target/release/
+          path: native/resvg_bridge/target/release/libresvg_bridge.so
+
+      - name: Upload native artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-lib-${{ matrix.os }}
+          path: native/resvg_bridge/target/release/resvg_bridge.dll
+
+      - name: Upload native artifact (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-lib-${{ matrix.os }}
+          path: native/resvg_bridge/target/release/libresvg_bridge.dylib
 
 
   build-plugin:
@@ -63,11 +81,26 @@ jobs:
           cache: gradle
 
 
-      # Download Linux native lib produced by the build-native job above.
+      # Download ALL platform native libs produced by the build-native job so the
+      # bundled plugin zip works on Windows/macOS/Linux (SvgBridgeLoader picks the
+      # right file name for the runtime OS). Shipping only the Linux .so made the
+      # plugin show a blank/“native library missing” panel on Windows.
       - name: Download native artifacts
         uses: actions/download-artifact@v4
         with:
           name: native-lib-ubuntu-latest
+          path: native/resvg_bridge/target/release/
+
+      - name: Download native artifacts (Windows)
+        uses: actions/download-artifact@v4
+        with:
+          name: native-lib-windows-latest
+          path: native/resvg_bridge/target/release/
+
+      - name: Download native artifacts (macOS)
+        uses: actions/download-artifact@v4
+        with:
+          name: native-lib-macos-latest
           path: native/resvg_bridge/target/release/
 
       # The committed gradlew has no executable bit (the GitHub contents API cannot set one),
