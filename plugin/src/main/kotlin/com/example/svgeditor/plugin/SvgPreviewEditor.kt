@@ -16,10 +16,14 @@ import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.components.AnActionLink
 import java.awt.BorderLayout
 import java.awt.Dimension
+import java.awt.GridBagConstraints
+import java.awt.GridBagLayout
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.beans.PropertyChangeListener
+import javax.swing.BorderFactory
 import javax.swing.JComponent
+import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JSplitPane
 import javax.swing.SwingUtilities
@@ -56,6 +60,8 @@ class SvgPreviewEditor(
     private val preview = createPreviewSafely(project, file)
 
     private var mode = Mode.SPLIT
+
+    private var fallbackApplied = false
 
     private val split =
         JSplitPane(JSplitPane.HORIZONTAL_SPLIT, textEditor.component, preview.component).apply {
@@ -126,6 +132,45 @@ class SvgPreviewEditor(
         if (!splitGuard.isRunning) splitGuard.start()
     }
 
+    /**
+     * Last-resort layout for environments where JSplitPane never gives the preview a real width
+     * despite repeated pixel-based retries: swaps the splitter for a borderless GridBagLayout
+     * 50/50 pair (no divider, no timing involved) and pins a one-line banner at the bottom so
+     * the condition is visible on screen — no log digging required.
+     */
+    private fun engageFallback(reason: String) {
+        if (fallbackApplied) return
+        fallbackApplied = true
+        splitGuard.stop()
+        LOG.warn(
+            "editor: fallback engaged ($reason) split=${split.width}x${split.height} " +
+                "right=${preview.component.width}x${preview.component.height}",
+        )
+        val pane =
+            JPanel(GridBagLayout()).apply {
+                fun constraints(gridx: Int): GridBagConstraints =
+                    GridBagConstraints().apply {
+                        this.gridx = gridx
+                        weightx = 0.5
+                        fill = GridBagConstraints.BOTH
+                    }
+                add(textEditor.component, constraints(0))
+                add(preview.component, constraints(1))
+            }
+        root.removeAll()
+        root.add(buildTabToolbar(), BorderLayout.NORTH)
+        root.add(pane, BorderLayout.CENTER)
+        root.add(
+            JLabel(
+                "<html><b>SvgEasy</b>: splitter failed ($reason) — switched to fixed 50/50 layout.</html>",
+            ).apply { border = BorderFactory.createEmptyBorder(2, 8, 2, 8) },
+            BorderLayout.SOUTH,
+        )
+        root.revalidate()
+        root.repaint()
+        applyMode(mode)
+    }
+
     private companion object {
         private const val MIN_PREVIEW_WIDTH = 80
         private const val SPLIT_GUARD_PERIOD_MS = 150
@@ -156,10 +201,16 @@ class SvgPreviewEditor(
     }
 
     private fun applyMode(mode: Mode) {
+        this.mode = mode
         val left = textEditor.component
         val right = preview.component
-        left.isVisible = mode != Mode.PREVIEW
-        right.isVisible = mode != Mode.SOURCE
+        if (fallbackApplied) {
+            left.isVisible = mode != Mode.PREVIEW
+            right.isVisible = mode != Mode.SOURCE
+            root.revalidate()
+            root.repaint()
+            return
+        }
         // setDividerLocation(double) treats the value as a ratio of the full divider range,
         // so 0.5 centres the split; JSplitPane then only lays out visible children, so hiding
         // either side collapses it automatically.
