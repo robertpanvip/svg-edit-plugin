@@ -24,3 +24,4 @@ native/*/target/
 # Headless drag-test artefacts
 dragtest_*.png
 app/dragtest_*.png
+.uploads/

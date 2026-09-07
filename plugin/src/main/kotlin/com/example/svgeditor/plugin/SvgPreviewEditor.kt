@@ -23,12 +23,15 @@ private val LOG = Logger.getInstance("SvgEasy")
 
 /**
  * Editor that shows the SVG source (a standard [TextEditor], left) side-by-side with the
- * interactive design canvas ([SvgPreviewPanel], right) in a single tab.
+ * interactive design canvas ([SvgPreviewPanel], right) in a single tab, via the platform's own
+ * [TextEditorWithPreview] (3-arg form; its default layout already is editor + preview).
  *
- * The split layout is the platform's own [TextEditorWithPreview]: it owns the splitter and its
- * whole lifecycle, and ships native editor-only / split / preview-only tab actions. We
- * deliberately add NO custom divider/resize logic — repeatedly forcing sizes during editor
- * initialization stalls the IDE's FileEditor lifecycle, so the platform layout is left alone.
+ * The platform persists the last view mode in the application-level `SvgEasyLayout` property and
+ * re-applies it every time the file is opened; a stale "editor only" value therefore keeps the
+ * preview component hidden and the right-hand canvas never becomes showing (the blank-canvas
+ * symptom). [init] pins the layout back to editor + preview on every construction: it re-shows
+ * the preview immediately and, because the written value equals the default layout, the stale
+ * property is dropped from PropertiesComponent.
  *
  * The preview is created through [createPreviewSafely]: any construction failure degrades to
  * [SvgEasyFallbackPanel] (a visible error notice), so editor creation itself can never throw
@@ -41,11 +44,11 @@ class SvgPreviewEditor(
         TextEditorProvider.getInstance().createEditor(project, file) as TextEditor,
         createPreviewSafely(project, file),
         "SvgEasy",
-        TextEditorWithPreview.Layout.SHOW_EDITOR_AND_PREVIEW,
     ) {
-    // Force the platform's view-mode (split) actions to render on the tab, so the user can switch
-    // between editor-only / split / preview-only right from the tab.
-    override fun isShowActionsInTabs(): Boolean = true
+    init {
+        setLayout(TextEditorWithPreview.Layout.SHOW_EDITOR_AND_PREVIEW)
+        LOG.info("editor: layout pinned to SHOW_EDITOR_AND_PREVIEW (effective=$layout)")
+    }
 }
 
 /** Builds the preview panel, degrading to [SvgEasyFallbackPanel] instead of throwing. */

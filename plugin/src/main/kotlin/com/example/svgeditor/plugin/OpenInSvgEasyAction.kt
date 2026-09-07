@@ -9,7 +9,7 @@ import com.intellij.openapi.vfs.VirtualFile
 /**
  * Opens the current `.svg` file and focuses its [SvgPreviewEditor] (text + design canvas) tab.
  *
- * The [SvgEditorProvider] already makes SvgEasy available as a tab whenever an `.svg` is opened,
+ * The [SvgPreviewEditorProvider] already makes SvgEasy available as a tab whenever an `.svg` is opened,
  * so this action is a convenience shortcut that opens the file and selects the SvgEasy editor.
  */
 class OpenInSvgEasyAction : AnAction() {
@@ -17,7 +17,7 @@ class OpenInSvgEasyAction : AnAction() {
         val project = e.project ?: return
         val file = e.getData(CommonDataKeys.VIRTUAL_FILE) ?: return
         if (!isSvg(file)) return
-        // Opens the file; the registered SvgEditorProvider surfaces the SvgEasy (text + design
+        // Opens the file; the registered SvgPreviewEditorProvider surfaces the SvgEasy (text + design
         // canvas) tab alongside the built-in SVG image viewer.
         FileEditorManager.getInstance(project).openFile(file, true)
     }

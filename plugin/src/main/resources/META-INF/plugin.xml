@@ -12,7 +12,7 @@
         <toolWindow id="SVG Editor"
                     anchor="right"
                     factoryClass="com.example.svgeditor.plugin.SvgEditorToolWindowFactory"/>
-        <fileEditorProvider implementation="com.example.svgeditor.plugin.SvgEditorProvider"
+        <fileEditorProvider implementation="com.example.svgeditor.plugin.SvgPreviewEditorProvider"
                             order="last"/>
     </extensions>
 

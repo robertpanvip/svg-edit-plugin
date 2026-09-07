@@ -2,6 +2,7 @@ package com.example.svgeditor.plugin
 
 import com.example.svgeditor.core.SvgEditorPanel
 import com.example.svgeditor.core.SvgRenderer
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.Document
@@ -28,6 +29,7 @@ import javax.swing.JComponent
 import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.SwingConstants
+import javax.swing.Timer
 import kotlin.math.roundToInt
 
 private val LOG = Logger.getInstance("SvgEasy")
@@ -53,7 +55,8 @@ class SvgPreviewPanel(
     private val project: Project,
     private val file: VirtualFile,
 ) : JPanel(BorderLayout()),
-    FileEditor {
+    FileEditor,
+    Disposable {
     private val userDataHolder = UserDataHolderBase()
     private val propertyChangeListeners = CopyOnWriteArrayList<PropertyChangeListener>()
     private val document: Document? = FileDocumentManager.getInstance().getDocument(file)
@@ -140,6 +143,17 @@ class SvgPreviewPanel(
                 }
             },
         )
+        Timer(
+            2000,
+        ) {
+            LOG.info(
+                "preview: probe showing=$isShowing size=${width}x$height " +
+                    "canvas=${panel?.width}x${panel?.height} svg=${panel?.layout?.width}x${panel?.layout?.height}",
+            )
+        }.apply {
+            isRepeats = false
+            start()
+        }
     }
 
     /** Document text when available, else the file bytes; null when neither is readable. */

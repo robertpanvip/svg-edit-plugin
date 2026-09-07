@@ -9,22 +9,17 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 
 /**
- * Makes [SvgPreviewEditor] available for `.svg` files. Registered with `order="last"` and
- * [FileEditorPolicy.PLACE_AFTER_DEFAULT_EDITOR], so opening an `.svg` file keeps the built-in
- * IDEA image viewer as the first tab and adds SvgEasy (text + design canvas) as a second tab
- * the user can click to switch to — mirroring the coexistence approach of SvgEazy
- * (`PLACE_BEFORE_DEFAULT_EDITOR` there, after here so the original viewer stays first).
- *
- * To make SvgEasy the *default* `.svg` editor instead (replacing the image viewer), change the
- * registration to `order="first"`.
+ * Makes [SvgPreviewEditor] available for `.svg` files. [FileEditorPolicy.PLACE_BEFORE_DEFAULT_EDITOR]
+ * puts the SvgEasy (text + design canvas) composite first in the tab, with the built-in image
+ * viewer kept as a secondary editor.
  */
-class SvgEditorProvider : FileEditorProvider, DumbAware {
+class SvgPreviewEditorProvider : FileEditorProvider, DumbAware {
     private val log = Logger.getInstance("SvgEasy")
 
     override fun accept(
         project: Project,
         file: VirtualFile,
-    ): Boolean = file.extension.equals("svg", ignoreCase = true)
+    ): Boolean = !file.isDirectory && file.extension?.equals("svg", ignoreCase = true) == true
 
     /** Never throws: even a failing [SvgPreviewEditor] degrades to a visible error tab. */
     override fun createEditor(
@@ -39,7 +34,7 @@ class SvgEditorProvider : FileEditorProvider, DumbAware {
             SvgEasyFallbackPanel(t)
         }
 
-    override fun getEditorTypeId(): String = "SvgEasy.text.editor"
+    override fun getEditorTypeId(): String = "SVG_PREVIEW"
 
-    override fun getPolicy(): FileEditorPolicy = FileEditorPolicy.PLACE_AFTER_DEFAULT_EDITOR
+    override fun getPolicy(): FileEditorPolicy = FileEditorPolicy.PLACE_BEFORE_DEFAULT_EDITOR
 }
