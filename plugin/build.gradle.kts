@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.example.svgeditor"
-version = "0.3.4"
+version = "0.3.5"
 
 repositories {
     maven("https://mirrors.cloud.tencent.com/nexus/repository/maven-public/")

@@ -208,6 +208,13 @@ class SvgEditorPanel(
                     if (scheduler != null) crispTimer?.restart() else renderAtDeviceSize()
                     canvas.repaint()
                 }
+
+                override fun componentShown(e: ComponentEvent) {
+                    if (scheduler != null && offscreen == null && engine.layout.width > 0) {
+                        renderAtDeviceSize()
+                        canvas.repaint()
+                    }
+                }
             },
         )
         scrollPane.border = null

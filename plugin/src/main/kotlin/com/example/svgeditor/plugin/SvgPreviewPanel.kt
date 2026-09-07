@@ -19,6 +19,8 @@ import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.JBColor
 import java.awt.BorderLayout
 import java.awt.Dimension
+import java.awt.event.ComponentAdapter
+import java.awt.event.ComponentEvent
 import java.beans.PropertyChangeListener
 import java.util.concurrent.CopyOnWriteArrayList
 import javax.swing.BorderFactory
@@ -127,6 +129,17 @@ class SvgPreviewPanel(
             add(NativeLibGuidePanel(SvgBridgeLoader.describeAttempts()), BorderLayout.CENTER)
         }
         document?.addDocumentListener(documentListener)
+        addComponentListener(
+            object : ComponentAdapter() {
+                override fun componentShown(e: ComponentEvent) {
+                    LOG.info(
+                        "preview: shown panel=${width}x$height canvas=${panel?.width}x${panel?.height} " +
+                            "inner=${panel?.debugCanvas()?.width}x${panel?.debugCanvas()?.height} " +
+                            "svg=${panel?.layout?.width}x${panel?.layout?.height}",
+                    )
+                }
+            },
+        )
     }
 
     /** Document text when available, else the file bytes; null when neither is readable. */

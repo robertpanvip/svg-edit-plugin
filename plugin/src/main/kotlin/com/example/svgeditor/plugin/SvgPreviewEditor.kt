@@ -23,6 +23,7 @@ import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.JSplitPane
 import javax.swing.SwingUtilities
+import javax.swing.Timer
 
 private val LOG = Logger.getInstance("SvgEasy")
 
@@ -61,6 +62,7 @@ class SvgPreviewEditor(
             isContinuousLayout = true
             resizeWeight = 0.5
             border = null
+            textEditor.component.minimumSize = Dimension(120, 120)
         }
 
     private val root =
@@ -71,26 +73,63 @@ class SvgPreviewEditor(
             minimumSize = Dimension(320, 240)
             addComponentListener(
                 object : ComponentAdapter() {
-                    override fun componentShown(e: ComponentEvent) = enforceSplitLayout("shown")
-                    override fun componentResized(e: ComponentEvent) = enforceSplitLayout("resized")
+                    override fun componentShown(e: ComponentEvent) {
+                        splitGuardTicks = 0
+                        LOG.info(
+                            "editor: shown split=${split.width}x${split.height} divider=${split.dividerLocation} " +
+                                "right=${preview.component.width}x${preview.component.height}",
+                        )
+                        enforceSplitLayout("shown")
+                    }
+
+                    override fun componentResized(e: ComponentEvent) {
+                        splitGuardTicks = 0
+                        enforceSplitLayout("resized")
+                    }
                 },
             )
         }
 
+    private val splitGuard =
+        Timer(SPLIT_GUARD_PERIOD_MS) { enforceSplitLayout("guard") }.apply { isRepeats = true }
+
+    private var splitGuardTicks = 0
+
+    /**
+     * Keeps re-applying a pixel-based divider location until the preview pane has a real width.
+     * `setDividerLocation(proportional)` is silently ignored by JSplitPane while the hierarchy is
+     * still being laid out (width == 0), which is how the preview ended up zero-width blank.
+     */
     private fun enforceSplitLayout(reason: String) {
-        LOG.info(
-            "editor: $reason split=${split.width}x${split.height} divider=${split.dividerLocation} " +
-                "mode=$mode left=${textEditor.component.width}x${textEditor.component.height} " +
-                "right=${preview.component.width}x${preview.component.height}",
-        )
-        if (mode == Mode.SPLIT && split.isShowing && split.width > 0) {
-            SwingUtilities.invokeLater {
-                split.setDividerLocation(0.5)
-                root.revalidate()
-                root.repaint()
-                LOG.info("editor: divider reapplied -> ${split.dividerLocation} (w=${split.width})")
-            }
+        if (mode != Mode.SPLIT || !root.isShowing) {
+            splitGuard.stop()
+            return
         }
+        val right = preview.component
+        if (right.width >= MIN_PREVIEW_WIDTH) {
+            splitGuard.stop()
+            return
+        }
+        if (splitGuardTicks >= SPLIT_GUARD_MAX_TICKS) {
+            splitGuard.stop()
+            return
+        }
+        splitGuardTicks++
+        if (split.width > 0) {
+            split.dividerLocation = split.width / 2
+        }
+        LOG.info(
+            "editor: $reason#$splitGuardTicks split=${split.width}x${split.height} " +
+                "divider=${split.dividerLocation} left=${textEditor.component.width}x${textEditor.component.height} " +
+                "right=${right.width}x${right.height}",
+        )
+        if (!splitGuard.isRunning) splitGuard.start()
+    }
+
+    private companion object {
+        private const val MIN_PREVIEW_WIDTH = 80
+        private const val SPLIT_GUARD_PERIOD_MS = 150
+        private const val SPLIT_GUARD_MAX_TICKS = 40
     }
 
     /** The compositional view modes exposed on the tab by the toolbar. */
@@ -155,6 +194,7 @@ class SvgPreviewEditor(
     override fun getFile(): VirtualFile? = file
 
     override fun dispose() {
+        splitGuard.stop()
         textEditor.dispose()
         if (preview is SvgPreviewPanel) preview.dispose()
     }
