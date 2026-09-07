@@ -521,6 +521,26 @@ fun runAsyncTest(): Int {
         require("translate(" in src) { "drag did not write translate(..) to the source SVG" }
         println("asynctest: drag OK — box-a (${before.x},${before.y}) -> (${after.x},${after.y}), source has translate()")
 
+        // Regression: the element must STAY at its committed position after release. Poll the
+        // committed raster until the async refresh lands and confirm the green fill's centroid is
+        // at the NEW box center — not snapped back to the pre-drag location (the "it jumps back
+        // on mouse-up" symptom), which happens when the canvas keeps painting the stale drag
+        // layers while the async re-render is pending.
+        val afterC = panel.debugElementCenterPx("box-a") ?: error("box-a center null after drag")
+        SwingUtilities.invokeAndWait {
+            panel.debugRelease() // idempotent: release already happened; ensures fresh paint
+            renderLoop(panel, img, 800) // let any async refinement land
+        }
+        val ced = greenCentroid(img) ?: error("box-a green fill disappeared after release")
+        require(ced.first > (after.x + after.width / 2.0) - 6) {
+            "REGRESSION — box-a snapped back after release: committed center x=${after.x + after.width / 2.0}, painted green centroid x=${ced.first} (released at ${afterC.x})"
+        }
+        println(
+            "asynctest: no-back-snap OK — committed box-a center (${(after.x + after.width / 2.0).toInt()}," +
+                " ${(after.y + after.height / 2.0).toInt()}) ~ painted green centroid (${"%.1f".format(ced.first)}," +
+                " ${"%.1f".format(ced.second)})",
+        )
+
         panel.dispose()
         println("ASYNCTEST OK")
         return 0
@@ -543,6 +563,19 @@ private fun scanGreen(img: BufferedImage): Boolean {
         }
     }
     return false
+}
+
+/** Render the panel into [img] repeatedly for ~[ms] so pending async renders can land. */
+private fun renderLoop(
+    panel: SvgEditorPanel,
+    img: BufferedImage,
+    ms: Long,
+) {
+    val deadline = System.currentTimeMillis() + ms
+    while (System.currentTimeMillis() < deadline) {
+        panel.debugRenderTo(img, 1.0)
+        Thread.sleep(50)
+    }
 }
 
 /**

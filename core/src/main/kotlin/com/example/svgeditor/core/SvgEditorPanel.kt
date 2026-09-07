@@ -486,14 +486,28 @@ class SvgEditorPanel(
         layerId = null
     }
 
-    /** Refresh rasters after a committed edit (engine re-parsed the layout, zero raster work). */
+    /**
+     * Refresh rasters after a committed edit (engine re-parsed the layout, zero raster work).
+     *
+     * Async mode: render the full scene **immediately and synchronously** into [offscreen] and
+     * drop the stale drag layers BEFORE re-queuing async refinements. Otherwise, on release the
+     * canvas keeps painting the pre-commit drag-layer composite (old base raster + old crop) and
+     * the moved element looks like it snaps back until the async render lands — the "it jumps
+     * back on mouse-up" symptom. A single synchronous raster here (small SVG + resvg is
+     * thread-safe) closes that window; [requestContent]/[requestLayers] then refine at full
+     * device resolution and re-warm the next drag.
+     */
     private fun refreshAfterEdit(id: String) {
         if (scheduler == null) {
             offscreen = renderNow()
             rebuildLayersSync(id)
         } else {
+            offscreen = renderNow()
+            clearLayers()
+            staticDirty = true
             requestContent()
             requestLayers(id)
+            canvas.repaint()
         }
     }
 
