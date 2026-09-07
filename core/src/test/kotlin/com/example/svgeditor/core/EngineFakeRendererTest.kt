@@ -8,7 +8,8 @@ class EngineFakeRendererTest {
     fun `load parses the layout`() {
         val engine = SvgEditorEngine(FakeSvgRenderer())
         engine.load(Samples.SIMPLE)
-        assertEquals(5, engine.layout.elements.size)
+        // The full-canvas "bg" background is dropped from the interactive layout (4 = 5 - bg).
+        assertEquals(4, engine.layout.elements.size)
     }
 
     @Test
@@ -63,9 +64,10 @@ class EngineFakeRendererTest {
     fun `renderAt re-renders at the requested device size`() {
         val engine = SvgEditorEngine(FakeSvgRenderer())
         engine.load(Samples.SIMPLE)
-        // FakeSvgRenderer ignores size, so assert it does not throw and keeps a layout.
+        // FakeSvgRenderer ignores size, so assert it does not throw and keeps a layout
+        // (full-canvas "bg" excluded, so 4 elements).
         engine.renderAt(400, 240)
-        assertEquals(5, engine.layout.elements.size)
+        assertEquals(4, engine.layout.elements.size)
     }
 
     @Test

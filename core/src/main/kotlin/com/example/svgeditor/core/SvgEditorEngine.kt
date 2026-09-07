@@ -68,7 +68,7 @@ class SvgEditorEngine(
 
     /** Re-parse the layout from the current source. Never rasterizes. */
     private fun reloadLayout() {
-        layout = SvgLayout.parse(renderer.layoutJson(svg))
+        layout = SvgLayout.parse(renderer.layoutJson(svg)).withoutFullCanvasBackground()
     }
 
     private fun render() {

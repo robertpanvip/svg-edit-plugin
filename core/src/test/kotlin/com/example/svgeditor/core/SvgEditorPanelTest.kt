@@ -9,8 +9,10 @@ class SvgEditorPanelTest {
     fun `loads svg and parses the layout`() {
         val panel = SvgEditorPanel(FakeSvgRenderer())
         panel.loadSvg(Samples.SIMPLE)
-        assertEquals(5, panel.layout.elements.size)
-        assertTrue(panel.layout.elements.map { it.id }.containsAll(listOf("bg", "box-a", "dot", "grp", "inner")))
+        // The full-canvas "bg" background is excluded from interaction, content is kept.
+        assertEquals(4, panel.layout.elements.size)
+        assertTrue(panel.layout.elements.map { it.id }.containsAll(listOf("box-a", "dot", "grp", "inner")))
+        assertFalse(panel.layout.elements.any { it.id == "bg" })
     }
 
     @Test
