@@ -15,13 +15,17 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Key
 import com.intellij.openapi.util.UserDataHolderBase
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.ui.JBColor
 import java.awt.BorderLayout
+import java.awt.Dimension
 import java.beans.PropertyChangeListener
 import java.util.concurrent.CopyOnWriteArrayList
+import javax.swing.BorderFactory
 import javax.swing.JComponent
 import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.SwingConstants
+import kotlin.math.roundToInt
 
 /**
  * Right-hand side of the [SvgPreviewEditor]: an interactive design canvas bound to the same
@@ -64,6 +68,35 @@ class SvgPreviewPanel(
 
     private val toolbar: JComponent? = panel?.let { SvgEasyToolbar.forPanel(it) }
 
+    /**
+     * Bottom status strip mirroring the built-in image viewer's size display: shows the SVG's
+     * pixel dimensions (`W × H px`) and the current zoom. Refreshed on every status emission from
+     * the canvas ([SvgEditorPanel.onStatus]) and on load.
+     */
+    private val infoValue =
+        JLabel(" ").apply {
+            horizontalAlignment = SwingConstants.RIGHT
+        }
+
+    private val infoBar: JPanel =
+        JPanel(BorderLayout()).apply {
+            add(infoValue, BorderLayout.EAST)
+            border =
+                BorderFactory.createCompoundBorder(
+                    BorderFactory.createMatteBorder(1, 0, 0, 0, JBColor.border()),
+                    BorderFactory.createEmptyBorder(3, 8, 3, 8),
+                )
+        }
+
+    private fun refreshInfo() {
+        val canvas = panel ?: return
+        val w = canvas.layout.width
+        val h = canvas.layout.height
+        val dim = if (w > 0 && h > 0) "${w.roundToInt()} × ${h.roundToInt()} px" else "— × — px"
+        infoValue.text =
+            if (w > 0 && h > 0) "$dim · Zoom ${canvas.getZoomPercent()}%" else dim
+    }
+
     private val documentListener =
         object : DocumentListener {
             override fun documentChanged(event: DocumentEvent) {
@@ -78,6 +111,13 @@ class SvgPreviewPanel(
 
     init {
         if (panel != null) {
+            // Give the split panes a meaningful initial extent, so the preview isn't squeezed to
+            // zero width inside TextEditorWithPreview's splitter (the tool-window path uses a
+            // BorderLayout holder and always has room, which is why only the tab looked blank).
+            preferredSize = Dimension(480, 360)
+            minimumSize = Dimension(200, 120)
+            panel.onStatus = { refreshInfo() }
+            panel.onRenderError = { showParseError(it) }
             // document can be null for exotic VFS states; fall back to the raw file bytes.
             fileText()?.let { loadSafely(it) } ?: showCanvas()
         } else {
@@ -108,6 +148,8 @@ class SvgPreviewPanel(
         removeAll()
         toolbar?.let { add(it, BorderLayout.NORTH) }
         add(canvas, BorderLayout.CENTER)
+        add(infoBar, BorderLayout.SOUTH)
+        refreshInfo()
         revalidate()
         repaint()
     }

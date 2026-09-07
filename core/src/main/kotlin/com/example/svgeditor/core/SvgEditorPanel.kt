@@ -130,6 +130,12 @@ class SvgEditorPanel(
     /** Status callback (zoom % + selection) for the host application. */
     var onStatus: ((String) -> Unit)? = null
 
+    /** Most recent render failure (async path), so a blank canvas is diagnosable instead of silent. */
+    private var lastRenderError: Throwable? = null
+
+    /** Fired when the off-EDT rasterization throws. Hosts show this instead of an empty canvas. */
+    var onRenderError: ((Throwable) -> Unit)? = null
+
     /**
      * Fired after an interactive edit (move / resize / rotate) is committed to the SVG model.
      * Hosts that bind the panel to a document use this to write the updated [svgSource] back.
@@ -345,20 +351,31 @@ class SvgEditorPanel(
             RenderScheduler.Slot.CONTENT,
             tag,
             {
-                val r = renderer.renderRgba(src, rw, rh)
-                RgbaImages.fromRgba(r.rgba, r.width, r.height)
+                val r =
+                    try {
+                        renderer.renderRgba(src, rw, rh)
+                    } catch (t: Throwable) {
+                        lastRenderError = t
+                        null
+                    }
+                if (r == null) null else RgbaImages.fromRgba(r.rgba, r.width, r.height)
             },
         ) { result, t ->
             val tt = t as? RenderTag
             if (
-                result != null && tt != null &&
+                tt != null &&
                 tt.svg === engine.svgSource &&
                 tt.w == devicePx(engine.layout.width) &&
                 tt.h == devicePx(engine.layout.height)
             ) {
-                offscreen = result
-                staticDirty = true
-                canvas.repaint()
+                if (result != null) {
+                    offscreen = result
+                    staticDirty = true
+                    canvas.repaint()
+                } else {
+                    // Async raster failed → surface it instead of leaving a silent blank canvas.
+                    lastRenderError?.let { onRenderError?.invoke(it) }
+                }
             }
         }
     }
