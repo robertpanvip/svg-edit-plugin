@@ -14,7 +14,6 @@ import com.intellij.openapi.fileEditor.FileEditorLocation
 import com.intellij.openapi.fileEditor.FileEditorState
 import com.intellij.openapi.fileEditor.FileEditorStateLevel
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.util.Key
 import com.intellij.openapi.util.UserDataHolderBase
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.JBColor
@@ -38,8 +37,10 @@ private val LOG = Logger.getInstance("SvgEasy")
  * Right-hand side of the [SvgPreviewEditor]: an interactive design canvas bound to the same
  * document as the left-hand text editor, with bidirectional sync.
  *
- * It implements [FileEditor] (not just [JComponent]) because in this IntelliJ version
- * `TextEditorWithPreview` takes the preview as a `FileEditor` whose [getComponent] is the canvas.
+ * It extends [UserDataHolderBase] and implements [FileEditor] with [Disposable]; the Swing
+ * container is the internal [root] component returned by [getComponent], keeping the editor
+ * lifecycle separate from the widget hierarchy (the same shape the platform's own preview
+ * editors use, since `TextEditorWithPreview` takes the preview as a `FileEditor`).
  *
  * - text → canvas: a [DocumentListener] reloads the SVG into [SvgEditorPanel] whenever the source
  *   is edited in the text editor.
@@ -54,10 +55,10 @@ private val LOG = Logger.getInstance("SvgEasy")
 class SvgPreviewPanel(
     private val project: Project,
     private val file: VirtualFile,
-) : JPanel(BorderLayout()),
+) : UserDataHolderBase(),
     FileEditor,
     Disposable {
-    private val userDataHolder = UserDataHolderBase()
+    private val root = JPanel(BorderLayout())
     private val propertyChangeListeners = CopyOnWriteArrayList<PropertyChangeListener>()
     private val document: Document? = FileDocumentManager.getInstance().getDocument(file)
     private var suppressReload = false
@@ -122,21 +123,21 @@ class SvgPreviewPanel(
             // Give the split panes a meaningful initial extent, so the preview isn't squeezed to
             // zero width inside TextEditorWithPreview's splitter (the tool-window path uses a
             // BorderLayout holder and always has room, which is why only the tab looked blank).
-            preferredSize = Dimension(480, 360)
-            minimumSize = Dimension(200, 120)
+            root.preferredSize = Dimension(480, 360)
+            root.minimumSize = Dimension(200, 120)
             panel.onStatus = { refreshInfo() }
             panel.onRenderError = { showParseError(it) }
             // document can be null for exotic VFS states; fall back to the raw file bytes.
             fileText()?.let { loadSafely(it) } ?: showCanvas()
         } else {
-            add(NativeLibGuidePanel(SvgBridgeLoader.describeAttempts()), BorderLayout.CENTER)
+            root.add(NativeLibGuidePanel(SvgBridgeLoader.describeAttempts()), BorderLayout.CENTER)
         }
         document?.addDocumentListener(documentListener)
-        addComponentListener(
+        root.addComponentListener(
             object : ComponentAdapter() {
                 override fun componentShown(e: ComponentEvent) {
                     LOG.info(
-                        "preview: shown panel=${width}x$height canvas=${panel?.width}x${panel?.height} " +
+                        "preview: shown panel=${root.width}x${root.height} canvas=${panel?.width}x${panel?.height} " +
                             "inner=${panel?.debugCanvas()?.width}x${panel?.debugCanvas()?.height} " +
                             "svg=${panel?.layout?.width}x${panel?.layout?.height}",
                     )
@@ -147,7 +148,7 @@ class SvgPreviewPanel(
             2000,
         ) {
             LOG.info(
-                "preview: probe showing=$isShowing size=${width}x$height " +
+                "preview: probe showing=${root.isShowing} size=${root.width}x${root.height} " +
                     "canvas=${panel?.width}x${panel?.height} svg=${panel?.layout?.width}x${panel?.layout?.height}",
             )
         }.apply {
@@ -175,20 +176,20 @@ class SvgPreviewPanel(
 
     private fun showCanvas() {
         val canvas = panel ?: return
-        if (canvas.parent === this && (toolbar == null || toolbar.parent === this)) return
-        removeAll()
-        toolbar?.let { add(it, BorderLayout.NORTH) }
-        add(canvas, BorderLayout.CENTER)
-        add(infoBar, BorderLayout.SOUTH)
+        if (canvas.parent === root && (toolbar == null || toolbar.parent === root)) return
+        root.removeAll()
+        toolbar?.let { root.add(it, BorderLayout.NORTH) }
+        root.add(canvas, BorderLayout.CENTER)
+        root.add(infoBar, BorderLayout.SOUTH)
         refreshInfo()
-        revalidate()
-        repaint()
+        root.revalidate()
+        root.repaint()
     }
 
     private fun showParseError(t: Throwable) {
         val detail = escapeHtml((t.message ?: t.javaClass.simpleName)).take(200)
-        removeAll()
-        add(
+        root.removeAll()
+        root.add(
             JLabel(
                 "<html><b>This SVG could not be rendered by SvgEasy</b><br>" +
                     "<span style=\"color:#888888\">$detail</span></html>",
@@ -198,8 +199,8 @@ class SvgPreviewPanel(
             },
             BorderLayout.CENTER,
         )
-        revalidate()
-        repaint()
+        root.revalidate()
+        root.repaint()
     }
 
     private fun escapeHtml(s: String): String =
@@ -222,9 +223,9 @@ class SvgPreviewPanel(
 
     // ---- FileEditor implementation ----
 
-    override fun getComponent(): JComponent = this
+    override fun getComponent(): JComponent = root
 
-    override fun getPreferredFocusedComponent(): JComponent = this
+    override fun getPreferredFocusedComponent(): JComponent = root
 
     override fun getName(): String = "SvgEasy"
 
@@ -252,11 +253,4 @@ class SvgPreviewPanel(
         document?.removeDocumentListener(documentListener)
         panel?.dispose()
     }
-
-    override fun <T : Any?> getUserData(key: Key<T>): T? = userDataHolder.getUserData(key)
-
-    override fun <T : Any?> putUserData(
-        key: Key<T>,
-        value: T?,
-    ) = userDataHolder.putUserData(key, value)
 }
