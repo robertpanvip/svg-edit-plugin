@@ -17,21 +17,24 @@ import javax.swing.JComponent
 /**
  * SvgEasy toolbar built from platform actions ([ActionToolbar] + [AnAction]), so it renders with
  * the exact same native look as the IDE's own editor toolbars (correct insets, hover, separator
- * and spacing styles) instead of hand-rolled Swing buttons. Buttons mirror the built-in image
- * viewer: zoom out / zoom in / actual size / fit, then grid and transparency-chessboard toggles.
+ * and spacing styles) instead of hand-rolled Swing buttons. The button set and order mirror the
+ * built-in image viewer's `Images.EditorToolbar` exactly: transparency chessboard, grid, a
+ * separator, then zoom in / zoom out / actual size / fit. (The image viewer's color picker,
+ * change-background and split-mode actions are omitted because SvgEasy's design canvas has no
+ * equivalent concept.)
  */
 object SvgEasyToolbar {
     /** Builds the native toolbar operating on [panel]; add its component at NORTH of a layout. */
     fun forPanel(panel: SvgEditorPanel): JComponent {
         val group =
             DefaultActionGroup(
-                ZoomOutAction(panel),
+                ChessboardToggleAction(panel),
+                GridToggleAction(panel),
+                Separator.create(),
                 ZoomInAction(panel),
+                ZoomOutAction(panel),
                 ActualSizeAction(panel),
                 FitAction(panel),
-                Separator.create(),
-                GridToggleAction(panel),
-                ChessboardToggleAction(panel),
             )
         val toolbar =
             ActionManager.getInstance().createActionToolbar(ActionPlaces.EDITOR_TOOLBAR, group, true)
@@ -88,14 +91,14 @@ object SvgEasyToolbar {
     }
 
     private class FitAction(panel: SvgEditorPanel) :
-        PanelAction(panel, "Fit Content", "Fit to window", AllIcons.General.FitContent) {
+        PanelAction(panel, "Fit to Window", "Fit to window", AllIcons.General.FitContent) {
         override fun actionPerformed(e: AnActionEvent) {
             panel.fitView()
         }
     }
 
     private class GridToggleAction(panel: SvgEditorPanel) :
-        PanelToggleAction(panel, "Show Grid", "Toggle image-pixel grid", AllIcons.Graph.Grid) {
+        PanelToggleAction(panel, "Show Grid", "Show or hide the image-pixel grid", AllIcons.Graph.Grid) {
         override fun isSelected(e: AnActionEvent): Boolean = panel.isGrid()
 
         override fun setSelected(e: AnActionEvent, state: Boolean) {
@@ -106,8 +109,8 @@ object SvgEasyToolbar {
     private class ChessboardToggleAction(panel: SvgEditorPanel) :
         PanelToggleAction(
             panel,
-            "Transparency Chessboard",
-            "Toggle transparency chessboard",
+            "Show Transparency",
+            "Show or hide the transparency chessboard",
             AllIcons.Actions.Preview,
         ) {
         override fun isSelected(e: AnActionEvent): Boolean = panel.isChessboard()
