@@ -48,31 +48,6 @@ class SvgLayoutTest {
     }
 
     @Test
-    fun `full-canvas background is excluded from interaction but content stays selectable`() {
-        val raw = SvgLayout.parse(Samples.LAYOUT_JSON)
-        assertNotNull(raw.byId("bg"))
-        val filtered = raw.withoutFullCanvasBackground()
-        // bg covers the whole canvas (0,0,200,120) → dropped from the interactive list.
-        assertNull(filtered.byId("bg"))
-        // Content elements are untouched.
-        assertEquals("box-a", filtered.byId("box-a")?.id)
-        assertEquals(4, filtered.elements.size)
-        // Empty canvas space no longer swallows clicks; content still hit-tests.
-        assertNull(filtered.hitTest(199.0, 119.0))
-        assertEquals("box-a", filtered.hitTest(50.0, 40.0)?.id)
-    }
-
-    @Test
-    fun `tolerance controls how close to the edge counts as background`() {
-        val inset = SvgElement(0, "inset", "path", 1.0, 1.0, 198.0, 118.0, doubleArrayOf(1.0, 0.0, 0.0, 1.0, 0.0, 0.0))
-        val layout = SvgLayout(200.0, 120.0, listOf(inset))
-        // 1 svg-unit inset: dropped at the default tolerance of 1.0 (edge-to-edge coverage)…
-        assertNull(layout.withoutFullCanvasBackground().byId("inset"))
-        // …but kept when the tolerance is tightened to 0 (must touch the exact edges).
-        assertNotNull(layout.withoutFullCanvasBackground(tolerance = 0.0).byId("inset"))
-    }
-
-    @Test
     fun `json parser handles nested arrays and escaped strings`() {
         val json = """{"a":[1,2,3],"b":"he said \"hi\"","c":true,"d":null,"e":1.5}"""
         val root = Json.parse(json) as Map<*, *>

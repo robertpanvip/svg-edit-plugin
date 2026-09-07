@@ -66,26 +66,6 @@ data class SvgLayout(
     /** Look up an element by its SVG `id` (null if not present / empty). */
     fun byId(id: String): SvgElement? = elements.firstOrNull { it.id == id }
 
-    /**
-     * Drop elements whose bounding box covers the whole canvas (within [tolerance] SVG units on
-     * every edge). Such layers are almost always background rectangles / outermost containers:
-     * keeping them in the hit-testable list means clicking empty canvas space selects a
-     * full-canvas box. They still render (they are part of the rasterized image), they are just
-     * not interactable — hover, selection, marquee and snap all go through [elements], so this
-     * single filter removes them from every interaction at once.
-     */
-    fun withoutFullCanvasBackground(tolerance: Double = 1.0): SvgLayout {
-        if (width <= 0.0 || height <= 0.0) return this
-        val keep =
-            elements.filterNot { el ->
-                el.x <= tolerance &&
-                    el.y <= tolerance &&
-                    el.right >= width - tolerance &&
-                    el.bottom >= height - tolerance
-            }
-        return if (keep.size == elements.size) this else SvgLayout(width, height, keep)
-    }
-
     companion object {
         /** Parse the JSON document produced by `resvg_bridge::svg_layout_json`. */
         fun parse(json: String): SvgLayout {
