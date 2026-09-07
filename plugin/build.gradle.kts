@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.example.svgeditor"
-version = "0.2.8"
+version = "0.2.9"
 
 repositories {
     mavenCentral()
@@ -82,26 +82,29 @@ intellijPlatform {
             "libresvg_bridge.dylib" to listOf("release", "debug", "release/deps", "debug/deps"),
             "libresvg_bridge.so" to listOf("release", "debug", "release/deps", "debug/deps"),
         )
-    var bundledAny = false
-    for ((fileName, searchPaths) in nativeCandidates) {
-        val lib =
-            searchPaths.firstNotNullOfOrNull { sub ->
-                file("$nativeBase/$sub/$fileName").takeIf { it.exists() }
-            }
-        if (lib != null) {
-            project.copy {
-                from(lib)
-                into(layout.buildDirectory.dir("resources/main"))
-            }
-            println("Bundled native lib: ${lib.absolutePath}")
-            bundledAny = true
-        } else {
-            println("NOTE: native lib '$fileName' not found under $nativeBase (skipped)")
+
+    // Resolve the first existing file for each candidate name.
+    val nativeLibs =
+        nativeCandidates.mapNotNull { (fileName, searchPaths) ->
+            val found =
+                searchPaths.firstNotNullOfOrNull { sub ->
+                    file("$nativeBase/$sub/$fileName").takeIf { it.exists() }
+                }
+            if (found != null) println("Bundled native lib: ${found.absolutePath}")
+            else println("NOTE: native lib '$fileName' not found under $nativeBase (skipped)")
+            found
         }
-    }
-    if (!bundledAny) {
+    if (nativeLibs.isEmpty()) {
         throw GradleException("No native resvg bridge found under $nativeBase — build it first (cargo build --release)")
     }
+    // Copy the native libs into processResources output as a task so that `clean` + rebuild
+    // reliably bundle them (a config-phase `project.copy` is lost after `clean`).
+    tasks.register<Copy>("copyNativeLibs") {
+        from(nativeLibs)
+        into(layout.buildDirectory.dir("resources/main"))
+    }
+    tasks.named("processResources") { dependsOn("copyNativeLibs") }
+    tasks.named("buildPlugin") { dependsOn("processResources") }
 }
 
 // Rename the distributable zip. By default its base name is the Gradle subproject

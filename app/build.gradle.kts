@@ -13,6 +13,10 @@ dependencies {
     // FlatLaf: the same Look & Feel IntelliJ IDEA ships with (FlatIntelliJLaf = IntelliJ Light,
     // FlatDarculaLaf = Darcula). Makes the standalone app look IDEA-consistent.
     implementation("com.formdev:flatlaf:3.7.2")
+    // JNA for the native resvg bridge at runtime. The `core` module declares JNA as `compileOnly`
+    // (the real plugin gets it from the IntelliJ platform); this standalone harness must supply
+    // its own copy to run the same pipeline outside the IDE.
+    implementation("net.java.dev.jna:jna:5.14.0")
 }
 
 kotlin {

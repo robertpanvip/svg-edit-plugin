@@ -77,6 +77,15 @@ fun main(args: Array<String>) {
         System.exit(code)
         return
     }
+    if (args.contains("--asynctest")) {
+        // Mirrors the REAL plugin: SvgEditorPanel(asyncRendering = true) driven on the EDT with the
+        // real resvg native lib + real RenderScheduler background thread. --smoke/--dragtest use the
+        // sync path, so this is the only harness that covers how the plugin actually runs.
+        System.setProperty("java.awt.headless", "true")
+        val code = runAsyncTest()
+        System.exit(code)
+        return
+    }
     SwingUtilities.invokeLater {
         // Use the same Look & Feel IntelliJ IDEA ships with.
         FlatIntelliJLaf.setup()
@@ -105,6 +114,12 @@ fun loadRenderer(): SvgRenderer {
         tmp.deleteOnExit()
         url.openStream().use { input -> tmp.outputStream().use { dst -> input.copyTo(dst) } }
         return ResvgBridge.load(tmp.absolutePath)
+    }
+    // Reset the JNA library path so a dev run (`gradle :app:run`) can locate the freshly built
+    // native lib in the repo, no resource packaging needed.
+    val release = File("../native/resvg_bridge/target/release").canonicalFile
+    if (release.resolve(libName).isFile) {
+        System.setProperty("jna.library.path", release.absolutePath)
     }
     return ResvgBridge.load()
 }
@@ -442,6 +457,92 @@ fun runDragTest(): Int {
         e.printStackTrace()
         return 1
     }
+}
+
+/**
+ * Headless async test: drives the panel exactly like the real plugin does.
+ *
+ * The plugin constructs `SvgEditorPanel(renderer, asyncRendering = true)` and calls `loadSvg` on the
+ * EDT; every raster is produced on a background thread and posted back through the EDT. This test
+ * replicates that: it runs on the EDT, uses the real resvg native lib + real RenderScheduler, and
+ * then forms a real EDT round-trip to check the canvas actually paints content (not blank) and that a
+ * drag commit still rewrites the SVG source. This is the gap in --smoke / --dragtest, which only
+ * exercise the deterministic sync path.
+ */
+fun runAsyncTest(): Int {
+    try {
+        FlatIntelliJLaf.setup()
+        val renderer = loadRenderer()
+        val imgW = 640
+        val imgH = 420
+        val panelRef = arrayOfNulls<SvgEditorPanel>(1)
+
+        // Build + load on the EDT, mirroring the plugin's editor creation.
+        SwingUtilities.invokeAndWait {
+            val p = SvgEditorPanel(renderer, asyncRendering = true)
+            p.debugCanvas().setSize(imgW, imgH)
+            p.loadSvg(Samples.SIMPLE)
+            panelRef[0] = p
+        }
+        val panel = panelRef[0]!!
+
+        // Poll the canvas (on the EDT) until the async CONTENT render has actually landed as pixels.
+        // A blank canvas never shows the green box — this is exactly the "tab is blank" symptom.
+        val img = BufferedImage(imgW, imgH, BufferedImage.TYPE_INT_RGB)
+        var greenSeen = false
+        val deadline = System.currentTimeMillis() + 8000
+        while (System.currentTimeMillis() < deadline) {
+            SwingUtilities.invokeAndWait { panel.debugRenderTo(img, 1.0) }
+            if (scanGreen(img)) {
+                greenSeen = true
+                break
+            }
+            Thread.sleep(25)
+        }
+        ImageIO.write(img, "png", File("asynctest_loaded.png"))
+        require(greenSeen) {
+            "ASYNC BLANK: no SVG content reached the canvas within 8s (width=${panel.layout.width}, height=${panel.layout.height}, elements=${panel.layout.elements.size})"
+        }
+        println(
+            "asynctest: async CONTENT render OK — canvas non-blank, layout ${panel.layout.width.toInt()}x" +
+                "${panel.layout.height.toInt()}, ${panel.layout.elements.size} interactive elements",
+        )
+
+        // Drag a real element on the EDT, exactly as a mouse drag would.
+        val before = panel.layout.byId("box-a")!!
+        val cx = panel.debugElementCenterPx("box-a") ?: error("box-a center null")
+        SwingUtilities.invokeAndWait {
+            panel.debugPressDrag(cx.x, cx.y, cx.x + 80, cx.y + 60)
+            panel.debugRelease()
+        }
+        val after = panel.layout.byId("box-a")!!
+        require(after.x > before.x + 10) { "drag did not move box-a right (${before.x} -> ${after.x})" }
+        val src = panel.svgSource
+        require("translate(" in src) { "drag did not write translate(..) to the source SVG" }
+        println("asynctest: drag OK — box-a (${before.x},${before.y}) -> (${after.x},${after.y}), source has translate()")
+
+        panel.dispose()
+        println("ASYNCTEST OK")
+        return 0
+    } catch (t: Throwable) {
+        println("ASYNCTEST FAILED: ${t.message}")
+        t.printStackTrace()
+        return 1
+    }
+}
+
+/** True when any strongly-green pixel is present (isolates box-a's #4caf50 fill from the scene). */
+private fun scanGreen(img: BufferedImage): Boolean {
+    for (y in 0 until img.height) {
+        for (x in 0 until img.width) {
+            val p = img.getRGB(x, y)
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            if (g > 140 && r < 110 && b < 120) return true
+        }
+    }
+    return false
 }
 
 /**
