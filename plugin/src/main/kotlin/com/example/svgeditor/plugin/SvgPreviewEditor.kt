@@ -28,6 +28,11 @@ import javax.swing.SwingConstants
  * [SvgEasyFallbackPanel] (a visible error notice), and the layout is pinned to
  * SHOW_EDITOR_AND_PREVIEW, so editor creation itself can never throw and leave a blank SvgEasy
  * tab — whatever goes wrong, the tab always renders something.
+ *
+ * Split mode: the platform's `TextEditorWithPreview` ships with three built-in view-mode
+ * toggle actions (editor only / split editor+preview / preview only) exposed through
+ * `getTabActions()`. They are hidden unless `isShowActionsInTabs()` is true, so we override it
+ * to always show them — giving every SvgEasy tab a native split-mode switcher.
  */
 class SvgPreviewEditor(
     project: Project,
@@ -37,7 +42,11 @@ class SvgPreviewEditor(
         createPreviewSafely(project, file),
         "SvgEasy",
         TextEditorWithPreview.Layout.SHOW_EDITOR_AND_PREVIEW,
-    )
+    ) {
+    // Force the platform's view-mode (split) actions to render on the tab, so the user can switch
+    // between editor-only / split / preview-only right from the tab.
+    override fun isShowActionsInTabs(): Boolean = true
+}
 
 /** Builds the preview panel, degrading to [SvgEasyFallbackPanel] instead of throwing. */
 private fun createPreviewSafely(project: Project, file: VirtualFile): FileEditor =
