@@ -53,4 +53,41 @@ class SvgEditorPanelTest {
         panel.fitView()
         assertEquals(1.0, panel.getZoom(), 1e-9)
     }
+
+    @Test
+    fun `load assigns synthetic ids so id-less elements become editable`() {
+        val panel = SvgEditorPanel(IdAwareSvgRenderer())
+        panel.loadSvg(Samples.NO_ID)
+        assertTrue(panel.svgSource.contains("""id="svg-el-1""""))
+        assertTrue(
+            panel.layout.elements.none { it.id.isBlank() },
+            "layout must have no blank ids after the patch",
+        )
+    }
+
+    @Test
+    fun `drag on an element without an id commits the move instead of snapping back`() {
+        val panel = SvgEditorPanel(IdAwareSvgRenderer())
+        panel.loadSvg(Samples.NO_ID)
+        // Same coordinates as the FakeSvgRenderer drag test: (50,40) -> (90,80) => delta (+40,+40).
+        panel.debugDrag(Point(50, 40), Point(90, 80))
+        assertTrue(
+            panel.svgSource.contains("translate(40, 40)"),
+            "the move must be committed to the source (no snap-back)",
+        )
+    }
+
+    @Test
+    fun `zoom math fits the viewport and stays stable across zoom steps`() {
+        val panel = SvgEditorPanel(IdAwareSvgRenderer())
+        panel.debugSetViewportSize(620, 460)
+        panel.loadSvg(Samples.SIMPLE)
+        panel.fitView()
+        val fitPercent = panel.getZoomPercent()
+        assertTrue(fitPercent in 100..400, "fit should be a sane percentage, got $fitPercent")
+        repeat(3) { panel.zoomIn() }
+        assertEquals(fitPercent * 1.728, panel.getZoomPercent().toDouble(), 2.0)
+        panel.actualSize()
+        assertEquals(100.0, panel.getZoomPercent().toDouble(), 1.0)
+    }
 }

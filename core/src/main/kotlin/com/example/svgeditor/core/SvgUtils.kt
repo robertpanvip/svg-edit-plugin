@@ -343,6 +343,87 @@ object SvgUtils {
     }
 
     /**
+     * Assign a unique synthetic `id` to every renderable element that has none.
+     *
+     * `usvg` reports elements without an `id` attribute with an empty id: they are still
+     * hit-testable and draggable, but every source-level edit locates its target by
+     * `id="..."` and would silently fail — the element visually snaps back on mouse-up (and
+     * the drag layers break the same way). Hosts call this once at load; a document whose
+     * elements all carry ids is returned unchanged.
+     */
+    fun ensureElementIds(svg: String): String {
+        val spans = scanTags(svg)
+        val missing =
+            spans.filter { s ->
+                s.id == null && isEditableTag(svg.substring(s.openStart, s.openEnd))
+            }
+        if (missing.isEmpty()) return svg
+        val used = HashSet<String>()
+        for (s in spans) s.id?.let { used.add(it) }
+        // Assign numbers in document order (first element -> svg-el-1), then apply the
+        // insertions back-to-front so the spans of not-yet-patched tags keep their offsets.
+        val attrs =
+            missing.map { s ->
+                var n = 1
+                while (!used.add("svg-el-$n")) n++
+                s to """id="svg-el-$n""""
+            }
+        var out = svg
+        for ((s, attr) in attrs.asReversed()) {
+            out = insertIntoOpenTag(out, s.openStart, s.openEnd, attr)
+        }
+        return out
+    }
+
+    /** Element tags that appear in the layout and are therefore editable targets. */
+    private val EDITABLE_TAG_NAMES =
+        setOf(
+            "g",
+            "path",
+            "rect",
+            "circle",
+            "ellipse",
+            "line",
+            "polyline",
+            "polygon",
+            "text",
+            "tspan",
+            "image",
+            "use",
+        )
+
+    private fun isEditableTag(tag: String): Boolean = tagNameOf(tag) in EDITABLE_TAG_NAMES
+
+    /** Local name of a tag string (e.g. `"rect"` for `"<rect …"`), lowercase, null if not a tag. */
+    private fun tagNameOf(tag: String): String? {
+        val t = tag.trimStart()
+        if (!t.startsWith("<") || t.startsWith("</") || t.startsWith("<!")) return null
+        val sb = StringBuilder()
+        for (c in t.substring(1)) {
+            if (c.isLetterOrDigit() || c == '-' || c == '_') sb.append(c.lowercaseChar()) else break
+        }
+        return sb.toString().takeIf { it.isNotEmpty() }
+    }
+
+    /** Insert an attribute into the open tag spanning `[openStart, openEnd)` (handles `/>`). */
+    private fun insertIntoOpenTag(
+        svg: String,
+        openStart: Int,
+        openEnd: Int,
+        attr: String,
+    ): String {
+        val tag = svg.substring(openStart, openEnd)
+        val selfClosing = tag.trimEnd().endsWith("/>")
+        val patched =
+            if (selfClosing) {
+                tag.substring(0, tag.length - 2) + " " + attr + " />"
+            } else {
+                tag.substring(0, tag.length - 1) + " " + attr + ">"
+            }
+        return svg.substring(0, openStart) + patched + svg.substring(openEnd)
+    }
+
+    /**
      * Build a minimal SVG that renders ONLY the element with `id` (and its ancestor `<g>`
      * groups, so a nested element keeps its correct absolute position). Everything else is
      * dropped. This is used for the foreground drag layer: unlike [hideElement], it never

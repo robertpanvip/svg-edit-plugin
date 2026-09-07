@@ -47,7 +47,7 @@ class SvgEditorEngine(
         svg = svgText
         renderW = 0
         renderH = 0
-        reloadLayout()
+        reloadLayoutEditable()
         render()
         captureGeom()
     }
@@ -62,13 +62,31 @@ class SvgEditorEngine(
         svg = svgText
         renderW = 0
         renderH = 0
-        reloadLayout()
+        reloadLayoutEditable()
         captureGeom()
     }
 
     /** Re-parse the layout from the current source. Never rasterizes. */
     private fun reloadLayout() {
         layout = SvgLayout.parse(renderer.layoutJson(svg))
+    }
+
+    /**
+     * Re-parse the layout after making the source fully editable: elements without an `id`
+     * attribute are reported by `usvg` with an empty id. They are still hit-testable, but every
+     * source-level edit locates its target by `id="..."` and would silently fail — the element
+     * snaps back to its original position on mouse-up (the drag layers break the same way).
+     * Synthetic ids are assigned once at load so every hit-testable element has a source anchor;
+     * documents whose elements all carry ids stay byte-for-byte identical.
+     */
+    private fun reloadLayoutEditable() {
+        reloadLayout()
+        if (layout.elements.none { it.id.isBlank() }) return
+        val patched = SvgUtils.ensureElementIds(svg)
+        if (patched != svg) {
+            svg = patched
+            reloadLayout()
+        }
     }
 
     private fun render() {

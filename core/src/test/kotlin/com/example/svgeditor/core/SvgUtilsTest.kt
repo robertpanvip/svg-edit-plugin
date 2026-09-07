@@ -42,6 +42,39 @@ class SvgUtilsTest {
     }
 
     @Test
+    fun `ensureElementIds gives every id-less element a unique synthetic id`() {
+        val patched = SvgUtils.ensureElementIds(Samples.NO_ID)
+        val ids =
+            Regex("""\bid\s*=\s*["']([^"']*)["']""")
+                .findAll(patched)
+                .map { it.groupValues[1] }
+                .toList()
+        // rect + rect + g + circle get ids; the <svg> root must stay untouched.
+        assertEquals(listOf("svg-el-1", "svg-el-2", "svg-el-3", "svg-el-4"), ids)
+        assertTrue(patched.contains("<rect"), "tags must stay well-formed")
+        assertTrue(
+            patched.contains("""fill="#2196f3" id="svg-el-4" />"""),
+            "the self-closing circle tag must survive the patch",
+        )
+    }
+
+    @Test
+    fun `ensureElementIds is a no-op when all elements already have ids`() {
+        assertEquals(Samples.SIMPLE, SvgUtils.ensureElementIds(Samples.SIMPLE))
+        assertEquals(Samples.TRANSFORMED, SvgUtils.ensureElementIds(Samples.TRANSFORMED))
+    }
+
+    @Test
+    fun `ensureElementIds is idempotent and avoids existing ids`() {
+        val once = SvgUtils.ensureElementIds(Samples.NO_ID)
+        assertEquals(once, SvgUtils.ensureElementIds(once))
+        // A document that already uses svg-el-1 must not collide with the synthetic ids.
+        val doc = """<svg xmlns="http://www.w3.org/2000/svg"><rect id="svg-el-1"/><rect/></svg>"""
+        val patched = SvgUtils.ensureElementIds(doc)
+        assertTrue(patched.contains("""id="svg-el-2""""))
+    }
+
+    @Test
     fun `soloElement keeps the ancestor group for a nested element`() {
         // `inner` lives inside <g id="grp" transform="translate(120,80)">. Soloing it must keep
         // that ancestor group (so the element keeps its absolute position) and must NOT keep the

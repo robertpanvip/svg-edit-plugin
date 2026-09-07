@@ -40,4 +40,20 @@ object Samples {
           </g>
         </svg>
     """
+
+    /**
+     * An SVG whose elements carry NO `id` attributes — the shape produced by many design
+     * tools. `usvg` reports these elements with an empty id, which used to make every
+     * source-level edit silently fail (drag-then-snap-back). The engine patches such
+     * documents with synthetic ids at load time.
+     */
+    const val NO_ID: String = """
+        <svg xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="0 0 200 120">
+          <rect x="0" y="0" width="200" height="120" fill="#fafafa"/>
+          <rect x="10" y="10" width="80" height="60" fill="#4caf50"/>
+          <g transform="translate(120,80)">
+            <circle cx="20" cy="10" r="10" fill="#2196f3"/>
+          </g>
+        </svg>
+    """
 }

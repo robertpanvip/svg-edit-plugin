@@ -264,8 +264,8 @@ class SvgEditorPanel(
         val w = engine.layout.width
         val h = engine.layout.height
         if (w <= 0 || h <= 0) return
-        val cw = canvas.width.takeIf { it > 0 } ?: 640
-        val ch = canvas.height.takeIf { it > 0 } ?: 420
+        val cw = viewW().takeIf { it > 0 } ?: 640
+        val ch = viewH().takeIf { it > 0 } ?: 420
         val fit = ((cw - 2 * pad) / w).coerceAtMost((ch - 2 * pad) / h).coerceAtLeast(0.01)
         zoom = (1.0 / fit).coerceIn(0.1, 16.0)
         recomputeView()
@@ -520,13 +520,37 @@ class SvgEditorPanel(
 
     // ---- internals: view math ----------------------------------------------
 
+    /** Debug-only viewport override for headless tests (null = use the real viewport). */
+    private var debugViewport: Dimension? = null
+
+    /**
+     * Visible width the fit/zoom math must fill: the scroll pane's viewport, falling back to the
+     * canvas size when the hierarchy was never laid out (headless tests). This must NOT be
+     * `canvas.width`: the canvas preferred size tracks the zoomed document, so feeding it back
+     * into the fit computation makes every recompute multiply the previous result by the zoom
+     * factor again (zoom-in explodes, zoom-out collapses to the minimum clamp).
+     */
+    private fun viewW(): Int =
+        debugViewport?.width?.takeIf { it > 0 }
+            ?: scrollPane.viewport.width.takeIf { it > 0 }
+            ?: canvas.width.takeIf { it > 0 }
+            ?: 0
+
+    /** Visible height for the fit/zoom math — see [viewW]. */
+    private fun viewH(): Int =
+        debugViewport?.height?.takeIf { it > 0 }
+            ?: scrollPane.viewport.height.takeIf { it > 0 }
+            ?: canvas.height.takeIf { it > 0 }
+            ?: 0
+
     /** Recompute viewScale + offset + canvas preferred size from the current zoom. */
     private fun recomputeView() {
         val w = engine.layout.width
         val h = engine.layout.height
         if (w <= 0 || h <= 0) return
-        val cw = canvas.width.takeIf { it > 0 } ?: return
-        val ch = canvas.height.takeIf { it > 0 } ?: return
+        val cw = viewW()
+        val ch = viewH()
+        if (cw <= 0 || ch <= 0) return
         val fit = ((cw - 2 * pad) / w).coerceAtMost((ch - 2 * pad) / h).coerceAtLeast(0.01)
         viewScale = fit * zoom
         offsetX = (cw - w * viewScale) / 2.0
@@ -548,8 +572,8 @@ class SvgEditorPanel(
         val w = engine.layout.width
         val h = engine.layout.height
         if (w <= 0 || h <= 0) return
-        val cw = canvas.width.takeIf { it > 0 } ?: 640
-        val ch = canvas.height.takeIf { it > 0 } ?: 420
+        val cw = viewW().takeIf { it > 0 } ?: 640
+        val ch = viewH().takeIf { it > 0 } ?: 420
         val oldView = viewScale
         val svgX = if (ax != null) (ax - offsetX) / oldView else null
         val svgY = if (ay != null) (ay - offsetY) / oldView else null
@@ -854,25 +878,28 @@ class SvgEditorPanel(
             return
         }
         val res = interaction.onMouseReleased()
+        var committed = false
         when (res) {
             is InteractionController.EditResult.Move -> {
-                engine.moveElement(res.element.id, res.dx, res.dy)
+                committed = engine.moveElement(res.element.id, res.dx, res.dy)
                 selectedId = res.element.id
-                refreshAfterEdit(res.element.id)
+                if (committed) refreshAfterEdit(res.element.id)
             }
             is InteractionController.EditResult.Resize -> {
-                engine.setElementBox(res.element.id, res.x, res.y, res.w, res.h)
+                committed = engine.setElementBox(res.element.id, res.x, res.y, res.w, res.h)
                 selectedId = res.element.id
-                refreshAfterEdit(res.element.id)
+                if (committed) refreshAfterEdit(res.element.id)
             }
             is InteractionController.EditResult.Rotate -> {
-                engine.rotateElement(res.element.id, res.angle, res.cx, res.cy)
+                committed = engine.rotateElement(res.element.id, res.angle, res.cx, res.cy)
                 selectedId = res.element.id
-                refreshAfterEdit(res.element.id)
+                if (committed) refreshAfterEdit(res.element.id)
             }
             null -> {}
         }
-        if (res != null) onEdit?.invoke()
+        // Fire onEdit only for real commits: a failed edit left the source unchanged, and
+        // re-rendering the unchanged source is exactly the drag-then-snap-back symptom.
+        if (committed) onEdit?.invoke()
         staticDirty = true
         canvas.repaint()
         emitStatus()
@@ -936,6 +963,15 @@ class SvgEditorPanel(
         renderAtDeviceSize()
         staticDirty = true
         canvas.repaint()
+    }
+
+    /** Test hook: pin the viewport size used by the fit/zoom math (headless has no layout). */
+    fun debugSetViewportSize(
+        w: Int,
+        h: Int,
+    ) {
+        debugViewport = Dimension(w, h)
+        recomputeView()
     }
 
     /** Test hook: render the canvas onto an off-screen image for visual inspection.
