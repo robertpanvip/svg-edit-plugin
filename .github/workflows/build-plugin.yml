@@ -36,17 +36,7 @@ jobs:
 
       - name: Build resvg_bridge
         working-directory: native/resvg_bridge
-        shell: bash
-        # On Windows, statically link the CRT (RUSTFLAGS target-feature=+crt-static) so the
-        # bundled resvg_bridge.dll / svg_easy_sidecar.exe carry no VCRUNTIME140.dll dependency:
-        # loading then works on machines without the VC++ Redistributable installed. Linux/macOS
-        # builds are left with their platform default.
-        run: |
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            RUSTFLAGS="-C target-feature=+crt-static" cargo build --release
-          else
-            cargo build --release
-          fi
+        run: cargo build --release
 
       # Upload ONLY the platform's cdylib so the plugin job can bundle all three
       # platform libs into one cross-platform plugin zip (uploading the whole
