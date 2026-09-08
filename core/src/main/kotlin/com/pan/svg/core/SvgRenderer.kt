@@ -19,8 +19,7 @@ data class RgbaResult(
     override fun hashCode(): Int = 31 * (width + 31 * height) + rgba.contentHashCode()
 }
 
-/**
- * Abstraction over the SVG rendering + layout backend.
+/** Abstraction over the SVG rendering + layout backend.
  *
  * `ResvgBridge` is the production implementation (JNA → `resvg_bridge` native lib). Tests
  * inject a fake implementation so the engine and panel can run without a Rust toolchain.
@@ -40,4 +39,25 @@ interface SvgRenderer {
     ): RgbaResult
 
     fun layoutJson(svg: String): String
+}
+
+/**
+ * Optional capability of an [SvgRenderer]: produce a **colour-ID hit canvas** for `svg`.
+ *
+ * Every paint leaf (path / image / text, groups transparent) is rasterized flat in a colour
+ * encoding its 1-based position within the layout's paint-leaf list (the elements whose
+ * `kind != "group"`), so a point hit is a single pixel sample — path-exact, independent of any
+ * sidecar, and the precise replacement for the bounding-box fallback. Text and images are
+ * approximated by their absolute bounding box, exactly as the geometry hit tests do.
+ *
+ * Implementations return `null` (or throw) when the canvas cannot be produced; callers then
+ * fall back to the bounding-box detector.
+ */
+interface SvgPickRenderer {
+    /** Render `svg` to a colour-ID canvas at the same fit size as [SvgRenderer.renderRgba]. */
+    fun renderPickRgba(
+        svg: String,
+        fitW: Int = 0,
+        fitH: Int = 0,
+    ): RgbaResult?
 }

@@ -32,6 +32,15 @@ interface ResvgLibrary : Library {
         outH: IntByReference,
     ): Pointer
 
+    fun svg_render_pick_rgba_bytes(
+        svg: ByteArray,
+        fitW: Int,
+        fitH: Int,
+        outLen: IntByReference,
+        outW: IntByReference,
+        outH: IntByReference,
+    ): Pointer
+
     fun svg_free_bytes(ptr: Pointer)
 
     fun svg_layout_json(svg: ByteArray): Pointer
@@ -60,7 +69,7 @@ data class RenderResult(
  */
 class ResvgBridge private constructor(
     private val lib: ResvgLibrary,
-) : SvgRenderer {
+) : SvgRenderer, SvgPickRenderer {
     /** Render `svg` to PNG bytes. `fitW`/`fitH` of 0 keeps the natural size. */
     override fun render(
         svg: String,
@@ -84,6 +93,24 @@ class ResvgBridge private constructor(
         }
         return RgbaResult(data, w, h)
     }
+
+    /**
+     * Render `svg` to a colour-ID hit canvas. A native library built before this symbol existed
+     * (or a transient native failure) yields `null`, and the panel falls back to bounding boxes.
+     */
+    override fun renderPickRgba(
+        svg: String,
+        fitW: Int,
+        fitH: Int,
+    ): RgbaResult? =
+        try {
+            val (data, w, h) = callRender(svg, fitW, fitH) { b, fw, fh, l, ow, oh ->
+                lib.svg_render_pick_rgba_bytes(b, fw, fh, l, ow, oh)
+            }
+            RgbaResult(data, w, h)
+        } catch (_: Throwable) {
+            null
+        }
 
     private inline fun callRender(
         svg: String,

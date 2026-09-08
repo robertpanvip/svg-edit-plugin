@@ -28,6 +28,9 @@ object SvgEasyToolbar {
     fun forPanel(panel: SvgEditorPanel): JComponent {
         val group =
             DefaultActionGroup(
+                MoveToolAction(panel),
+                MarqueeToolAction(panel),
+                Separator.create(),
                 ChessboardToggleAction(panel),
                 GridToggleAction(panel),
                 Separator.create(),
@@ -68,6 +71,37 @@ object SvgEasyToolbar {
 
         override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT
     }
+
+    /**
+     * Mutually exclusive tool toggles ("Move" vs "Box Select"). Both read the live tool from
+     * [SvgEditorPanel.getTool], so clicking one automatically un-presses the other on the next
+     * toolbar refresh; clicking the already-active tool keeps it active (radio behaviour).
+     */
+    private abstract class ToolToggleAction(
+        protected val panel: SvgEditorPanel,
+        text: String,
+        description: String,
+        private val tool: SvgEditorPanel.Tool,
+    ) : ToggleAction(text, description, null) {
+        override fun isSelected(e: AnActionEvent): Boolean = panel.getTool() == tool
+
+        override fun setSelected(e: AnActionEvent, state: Boolean) {
+            if (state) panel.setTool(tool)
+        }
+
+        override fun update(e: AnActionEvent) {
+            super.update(e)
+            e.presentation.isEnabled = panel.isShowing
+        }
+
+        override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT
+    }
+
+    private class MoveToolAction(panel: SvgEditorPanel) :
+        ToolToggleAction(panel, "Move", "Move: select, drag, resize and rotate elements", SvgEditorPanel.Tool.MOVE)
+
+    private class MarqueeToolAction(panel: SvgEditorPanel) :
+        ToolToggleAction(panel, "Box Select", "Box Select: drag a rectangle to select", SvgEditorPanel.Tool.MARQUEE)
 
     private class ZoomInAction(panel: SvgEditorPanel) :
         PanelAction(panel, "Zoom In", "Zoom in", AllIcons.General.ZoomIn) {

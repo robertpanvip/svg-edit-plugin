@@ -23,6 +23,7 @@
 
 pub mod dom;
 pub mod geom;
+pub mod pick;
 pub mod session;
 
 use std::collections::HashMap;
@@ -305,6 +306,34 @@ pub unsafe extern "C" fn svg_render_rgba_bytes(
     };
 
     hand_out_buffer(pixmap.data().to_vec(), out_len, out_w, out_h, pw, ph)
+}
+
+/// Render `svg` into a colour-ID hit canvas (see [`pick::render_pick`]) as raw premultiplied
+/// RGBA8 bytes — one flat, opaque colour per paint leaf, each colour encoding the leaf's
+/// position in the layout list. Sized exactly like [`svg_render_rgba_bytes`].
+/// Returns a heap-allocated buffer (free with [`svg_free_bytes`]) or null on failure.
+///
+/// # Safety
+/// `svg` must be a valid NUL-terminated UTF-8 string. `out_len`, `out_w`,
+/// `out_h` must be non-null.
+#[no_mangle]
+pub unsafe extern "C" fn svg_render_pick_rgba_bytes(
+    svg: *const c_char,
+    fit_w: u32,
+    fit_h: u32,
+    out_len: *mut u32,
+    out_w: *mut u32,
+    out_h: *mut u32,
+) -> *mut u8 {
+    let svg_str = match svg_arg(svg) {
+        Some(s) => s,
+        None => return ptr::null_mut(),
+    };
+    let (rgba, pw, ph) = match pick::render_pick(svg_str, fit_w, fit_h) {
+        Some(v) => v,
+        None => return ptr::null_mut(),
+    };
+    hand_out_buffer(rgba, out_len, out_w, out_h, pw, ph)
 }
 
 /// Extract the per-element layout of `svg` as a JSON string.

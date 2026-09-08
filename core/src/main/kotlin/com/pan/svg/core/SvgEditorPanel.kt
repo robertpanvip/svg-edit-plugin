@@ -50,10 +50,12 @@ import javax.swing.Timer
  * Editing commits ([InteractionController] preview -> [SvgEditorEngine] edit) re-parse the
  * LAYOUT only; the raster refresh is scheduled through the same background pipeline.
  *
- * Interaction model:
+ * Interaction model (two strictly separated tools, default = MOVE):
  *  - click to select, LeaferJS-style accent frame with round handles + rotate grip
- *  - drag body = move, drag handle = resize, drag rotate grip = rotate (with snapping)
- *  - marquee selection on empty canvas (rubber-band, topmost element wins)
+ *  - drag body = move, drag handle = resize, drag rotate grip = rotate (with snapping);
+ *    click empty space in MOVE mode deselects (no implicit rubber band)
+ *  - MARQUEE tool: press anywhere → rubber band; a drag selects the topmost element inside
+ *    the band, a click selects the exact element under the pointer
  *  - hit tests are path-exact via the sidecar (equivalent to LeaferJS offscreen colour
  *    picking): a pointer only targets an element whose filled/stroked geometry it touches
  *  - space / middle-mouse pans the scroll viewport, wheel zooms around the cursor
@@ -69,6 +71,9 @@ class SvgEditorPanel(
     asyncRendering: Boolean = false,
     private val sidecar: SidecarClient? = null,
 ) : JPanel() {
+    /** Active interaction tool: MOVE = direct manipulation, MARQUEE = rubber-band box select. */
+    enum class Tool { MOVE, MARQUEE }
+
     private val engine = SvgEditorEngine(renderer)
     private val interaction = InteractionController().apply {
         preciseHitTest = { x, y -> hitTestAt(x, y) }
@@ -88,6 +93,14 @@ class SvgEditorPanel(
 
     /** Off-screen canvas: the full SVG render at device resolution. */
     private var offscreen: BufferedImage? = null
+
+    /**
+     * Colour-ID hit canvas (legacy pipeline only, when [pickRenderer] is available): the same
+     * document rasterized with every paint leaf drawn flat in a colour encoding its position in
+     * the layout list. Path-exact hover/click/box-select without the sidecar.
+     */
+    private val pickRenderer: SvgPickRenderer? = renderer as? SvgPickRenderer
+    private var pickImage: BufferedImage? = null
 
     /** Drag layers: background (element hidden) + foreground (element solo), device-sized. */
     private var bgImage: BufferedImage? = null
@@ -140,6 +153,9 @@ class SvgEditorPanel(
     /** Marquee (rubber-band) selection state, in panel pixels. */
     private var marqueeOrigin: Point? = null
     private var marqueeRect: Rectangle? = null
+
+    /** Active tool. Defaults to [Tool.MOVE]; switch via [setTool]. */
+    private var tool = Tool.MOVE
 
     private var spaceDown = false
     private var panLast: Point? = null
@@ -284,6 +300,7 @@ class SvgEditorPanel(
         interaction.selectedHandle = null
         interaction.previewAngle = 0.0
         clearLayers()
+        pickImage = null
         recomputeView()
         renderAtDeviceSize()
         canvas.repaint()
@@ -340,6 +357,31 @@ class SvgEditorPanel(
 
     fun isGrid(): Boolean = gridEnabled
 
+    /** Current interaction tool. */
+    fun getTool(): Tool = tool
+
+    /**
+     * Switch the active interaction tool.
+     *
+     *  - [Tool.MOVE]: press/drag an element to select + move it, drag its handles to resize /
+     *    rotate, click empty space to deselect. This is the default.
+     *  - [Tool.MARQUEE]: pressing ANYWHERE (on or off an element) starts a rubber-band box;
+     *    on release the topmost element inside the band is selected, and a plain click without
+     *    dragging selects the exact element under the pointer. Element dragging is disabled.
+     */
+    fun setTool(t: Tool) {
+        if (tool == t) return
+        tool = t
+        // A switch never leaves a half-finished marquee or hover state behind.
+        marqueeOrigin = null
+        marqueeRect = null
+        if (t == Tool.MARQUEE) {
+            interaction.selectedHandle = null
+        }
+        updateCursor()
+        canvas.repaint()
+    }
+
     /** Reset zoom to the fit view. */
     fun fitView() {
         zoom = 1.0
@@ -373,8 +415,8 @@ class SvgEditorPanel(
 
     /**
      * Canvas-space hit test: exact path hit via the sidecar when active (element ids are
-     * normalized to node-id strings so selection keys stay unique), else the local
-     * bounding-box detector.
+     * normalized to node-id strings so selection keys stay unique), else the local colour-ID
+     * hit canvas when the renderer provides one, else the bounding-box detector.
      */
     private fun hitTestAt(ix: Double, iy: Double): SvgElement? {
         val sc = sidecar
@@ -384,7 +426,54 @@ class SvgEditorPanel(
             val el = engine.layout.byNodeId(nodeId) ?: return null
             return el.copy(id = el.id.ifBlank { nodeId.toString() })
         }
+        val img = pickImage
+        if (img != null && vpPreview == null) {
+            val lw = engine.layout.width
+            val lh = engine.layout.height
+            if (lw > 0.0 && lh > 0.0) {
+                val dx = (ix * img.width / lw).toInt()
+                val dy = (iy * img.height / lh).toInt()
+                if (dx in 0 until img.width && dy in 0 until img.height) {
+                    val value = pickPixelValue(img, dx, dy)
+                    // The canvas is authoritative: a transparent pixel means no element paints
+                    // there (a concave shape's hole / a gap), regardless of any bounding boxes.
+                    if (value == 0) return null
+                    return elementForPickValue(value)
+                }
+            }
+        }
         return CollisionDetector.hitTest(engine.layout, ix, iy)
+    }
+
+    /** Read a colour ordinal out of an `ARGB_PRE` pick pixel, un-premultiplying the alpha edge. */
+    private fun pickPixelValue(
+        img: BufferedImage,
+        dx: Int,
+        dy: Int,
+    ): Int {
+        val v = img.getRGB(dx, dy)
+        val a = (v ushr 24) and 0xFF
+        if (a < 40) return 0
+        val r = (v ushr 16) and 0xFF
+        val g = (v ushr 8) and 0xFF
+        val b = v and 0xFF
+        if (a >= 255) return (r shl 16) or (g shl 8) or b
+        return ((r * 255 / a) shl 16) or ((g * 255 / a) shl 8) or (b * 255 / a)
+    }
+
+    /**
+     * Map a pick ordinal (1-based) to the matching layout element: the `value`-th element whose
+     * `kind != "group"` (groups never paint and are transparent to pointer events).
+     */
+    private fun elementForPickValue(value: Int): SvgElement? {
+        if (value <= 0) return null
+        var leaf = 0
+        for (el in engine.layout.elements) {
+            if (el.kind == "group") continue
+            leaf++
+            if (leaf == value) return el
+        }
+        return null
     }
 
     /** Logical unit -> device pixels at the current zoom + DPI. */
@@ -419,24 +508,34 @@ class SvgEditorPanel(
             offscreen = renderNow()
             vpImage = null
             vpPreview = null
+            refreshPickNow()
             return
         }
         val tag = RenderTag(engine.svgSource, devicePx(engine.layout.width), devicePx(engine.layout.height))
         val src = tag.svg
         val rw = tag.w
         val rh = tag.h
+        val pr = pickRenderer
         scheduler.submit(
             RenderScheduler.Slot.CONTENT,
             tag,
             {
-                val r =
+                // Render content + colour-ID hit canvas in ONE background job so they always
+                // arrive as a consistent pair at the same device resolution.
+                val content =
                     try {
                         renderer.renderRgba(src, rw, rh)
                     } catch (t: Throwable) {
                         lastRenderError = t
                         null
                     }
-                if (r == null) null else RgbaImages.fromRgba(r.rgba, r.width, r.height)
+                val cimg =
+                    if (content == null) {
+                        null
+                    } else {
+                        RgbaImages.fromRgba(content.rgba, content.width, content.height)
+                    }
+                cimg to pickOf(pr, src, rw, rh)
             },
         ) { result, t ->
             val tt = t as? RenderTag
@@ -446,8 +545,10 @@ class SvgEditorPanel(
                 tt.w == devicePx(engine.layout.width) &&
                 tt.h == devicePx(engine.layout.height)
             ) {
-                if (result != null) {
-                    offscreen = result
+                val cimg = result?.first
+                if (cimg != null) {
+                    offscreen = cimg
+                    pickImage = result?.second
                     vpImage = null
                     vpPreview = null
                     staticDirty = true
@@ -458,6 +559,34 @@ class SvgEditorPanel(
                 }
             }
         }
+    }
+
+    /** Render a colour-ID canvas via [SvgPickRenderer], or null when unavailable/failed. */
+    private fun pickOf(
+        pr: SvgPickRenderer?,
+        src: String,
+        rw: Int,
+        rh: Int,
+    ): BufferedImage? {
+        if (pr == null) return null
+        return try {
+            val r = pr.renderPickRgba(src, rw, rh) ?: return null
+            RgbaImages.fromRgba(r.rgba, r.width, r.height)
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /** Rebuild the hit canvas synchronously at the current device size (legacy pipeline). */
+    private fun refreshPickNow() {
+        val w = engine.layout.width
+        val h = engine.layout.height
+        val pr = pickRenderer
+        if (pr == null || w <= 0 || h <= 0) {
+            pickImage = null
+            return
+        }
+        pickImage = pickOf(pr, engine.svgSource, devicePx(w), devicePx(h))
     }
 
     /**
@@ -702,9 +831,11 @@ class SvgEditorPanel(
         }
         if (scheduler == null) {
             offscreen = renderNow()
+            refreshPickNow()
             rebuildLayersSync(id)
         } else {
             offscreen = renderNow()
+            refreshPickNow()
             clearLayers()
             staticDirty = true
             requestContent()
@@ -947,6 +1078,7 @@ class SvgEditorPanel(
     private fun updateCursor() {
         canvas.cursor =
             when {
+                tool == Tool.MARQUEE -> Cursor(Cursor.CROSSHAIR_CURSOR)
                 panLast != null || spaceDown -> Cursor(Cursor.HAND_CURSOR)
                 interaction.selectedHandle != null -> when (interaction.selectedHandle) {
                     InteractionController.Handle.NW, InteractionController.Handle.SE -> Cursor(Cursor.NW_RESIZE_CURSOR)
@@ -973,7 +1105,9 @@ class SvgEditorPanel(
             hoveredId = newHover
             pendingHoverId = newHover
             // Pre-heat the drag layers shortly after hover so the first drag is already warm.
-            if (scheduler != null && newHover != null && selectedId == null && newHover != layerId) {
+            // Only the MOVE tool ever drags; the MARQUEE tool must not spend raster budget (or
+            // risk the composite flash) on mere hover.
+            if (scheduler != null && tool == Tool.MOVE && newHover != null && selectedId == null && newHover != layerId) {
                 preheatTimer?.restart()
             }
         }
@@ -996,6 +1130,18 @@ class SvgEditorPanel(
         x: Int,
         y: Int,
     ) {
+        // MARQUEE tool: pressing ANYWHERE — on an element or on empty canvas — begins a rubber
+        // band. Move/resize/rotate are disabled in this mode; what gets selected is resolved on
+        // release (finishMarquee): a drag selects the topmost element inside the band, a click
+        // without a drag selects the exact element under the pointer.
+        if (tool == Tool.MARQUEE) {
+            marqueeOrigin = Point(x, y)
+            marqueeRect = null
+            interaction.selectedHandle = null
+            canvas.repaint()
+            return
+        }
+
         val (ix, iy) = toImage(x, y)
         val tol = EditorTheme.HANDLE_TOLERANCE / viewScale
         // Re-bind the controller's selection to the CURRENT layout before any geometry
@@ -1022,12 +1168,12 @@ class SvgEditorPanel(
                 }
             }
         }
-        // Empty canvas away from the current selection's handles: start a marquee (and clear
-        // the selection, preserving the click-empty-deselect behavior for <3px drags).
+        // MOVE tool on empty canvas away from the selection's handles: deselect. The rubber
+        // band is NOT auto-started here — the two tools are strictly separated, so a drag on
+        // empty space in MOVE mode is a plain click-to-deselect (the first click of a "box
+        // select" only exists under the MARQUEE tool).
         val hit = hitTestAt(ix, iy)
         if (hit == null && !nearSelectionHandles(x, y)) {
-            marqueeOrigin = Point(x, y)
-            marqueeRect = null
             interaction.selected = null
             interaction.selectedHandle = null
             selectedId = null
@@ -1039,6 +1185,8 @@ class SvgEditorPanel(
         val newSel = interaction.selected?.id
         selectedId = newSel
         if (newSel != null) {
+            // The hover preheat may already hold this element's layers (warm cache); re-issuing
+            // the identical render would just delay the first drag frame for no visual gain.
             if (layerId != newSel) requestLayers(newSel)
         } else {
             clearLayers()
@@ -1080,26 +1228,46 @@ class SvgEditorPanel(
     }
 
     private fun finishMarquee() {
+        val o = marqueeOrigin ?: return
         val r = marqueeRect
         marqueeOrigin = null
         marqueeRect = null
-        if (r == null) return
-        if (r.width < 3 && r.height < 3) {
-            clearLayers()
+        if (r == null || (r.width < 3 && r.height < 3)) {
+            // Click without a drag: select the exact element under the pointer (or deselect).
+            val (ix, iy) = toImage(o.x, o.y)
+            val hit = hitTestAt(ix, iy)
+            if (hit != null) {
+                interaction.selected = hit
+                interaction.selectedHandle = null
+                selectedId = hit.id
+                if (layerId != hit.id) requestLayers(hit.id)
+            } else {
+                interaction.selected = null
+                interaction.selectedHandle = null
+                selectedId = null
+                clearLayers()
+            }
             canvas.repaint()
+            emitStatus()
             return
         }
         val sx = (r.x - offsetX) / viewScale
         val sy = (r.y - offsetY) / viewScale
         val sw = r.width / viewScale
         val sh = r.height / viewScale
-        // lastOrNull = topmost element intersecting the band, matching the z-order feel.
-        val top = engine.layout.intersecting(sx, sy, sw, sh).lastOrNull()
+        // Precise band hit via the colour-ID canvas when available (topmost PAINTED leaf inside
+        // the band); otherwise the bounding-box intersect (topmost element), matching the z-order.
+        val top =
+            if (pickImage != null && vpPreview == null) {
+                regionPickTop(sx, sy, sw, sh)
+            } else {
+                engine.layout.intersecting(sx, sy, sw, sh).lastOrNull()
+            }
         if (top != null) {
             interaction.selected = top
             interaction.selectedHandle = null
             selectedId = top.id
-            requestLayers(top.id)
+            if (layerId != top.id) requestLayers(top.id)
         } else {
             interaction.selected = null
             selectedId = null
@@ -1107,6 +1275,43 @@ class SvgEditorPanel(
         }
         canvas.repaint()
         emitStatus()
+    }
+
+    /**
+     * Topmost PAINTED leaf inside the SVG-space rectangle `(sx, sy, sw, sh)`, read from the
+     * colour-ID canvas. Returns null when nothing paints inside (concave holes / gaps are
+     * respected, unlike a bounding-box intersect) or when the canvas is unavailable.
+     */
+    private fun regionPickTop(
+        sx: Double,
+        sy: Double,
+        sw: Double,
+        sh: Double,
+    ): SvgElement? {
+        val img = pickImage ?: return null
+        val lw = engine.layout.width
+        val lh = engine.layout.height
+        if (lw <= 0.0 || lh <= 0.0) return null
+        val kx = img.width / lw
+        val ky = img.height / lh
+        val x0 = (sx * kx).toInt().coerceIn(0, img.width)
+        val y0 = (sy * ky).toInt().coerceIn(0, img.height)
+        val x1 = ((sx + sw) * kx).toInt().coerceIn(0, img.width)
+        val y1 = ((sy + sh) * ky).toInt().coerceIn(0, img.height)
+        if (x1 <= x0 || y1 <= y0) return null
+        var best = 0
+        var y = y0
+        while (y < y1) {
+            var x = x0
+            while (x < x1) {
+                val v = pickPixelValue(img, x, y)
+                if (v > best) best = v
+                x++
+            }
+            y++
+        }
+        if (best <= 0) return null
+        return elementForPickValue(best)
     }
 
     private fun handleRelease() {
@@ -1312,10 +1517,17 @@ class SvgEditorPanel(
     // ---- rendering --------------------------------------------------------
 
     private fun renderCanvas(g: Graphics2D) {
-        // Layered compositing (baked bg + cropped fg) whenever a selected element has cached
-        // layers — both DURING a drag and at rest — so the representation is identical across
-        // the drag->release boundary and the element never "pops" between preview and commit.
-        val useLayers = layerId != null && bgImage != null && fgImage != null
+        // Layered compositing (baked bg + cropped fg) whenever the CURRENTLY SELECTED element
+        // has cached layers — both DURING a drag and at rest — so the representation is
+        // identical across the drag->release boundary and the element never "pops" between
+        // preview and commit.
+        //
+        // A mere hover (nothing selected) must never switch the canvas into this composite:
+        // the hover preheat builds the SAME layers ahead of a press, but painting them at rest
+        // silently swaps the whole frame to a separately re-rasterized bg+fg pair, which shows
+        // up as a one-frame flash/pop as the pointer glides over an element. Layers therefore
+        // only drive the picture once the element is actually selected (or being dragged).
+        val useLayers = layerId != null && layerId == selectedId && bgImage != null && fgImage != null
         if (useLayers) {
             staticDrag = true // the base raster for the layers is the bg layer (element hidden)
             if (staticLayer == null || staticDirty || staticBgColor != background) {

@@ -2,6 +2,7 @@ package com.pan.svg.core
 
 import java.awt.Dimension
 import java.awt.Insets
+import javax.swing.ButtonGroup
 import javax.swing.Icon
 import javax.swing.JButton
 import javax.swing.JSeparator
@@ -81,9 +82,40 @@ fun createEditorToolbar(
         return b
     }
 
+    /** Text-only radio button for the interaction tools (Move / Box Select). */
+    fun toolToggle(
+        text: String,
+        tooltip: String,
+        tool: SvgEditorPanel.Tool,
+    ): JToggleButton =
+        JToggleButton(text).apply {
+            this.toolTipText = tooltip
+            isFocusable = false
+            margin = Insets(4, 6, 4, 6)
+            isSelected = panel.getTool() == tool
+        }
+
     return JToolBar().apply {
         isFloatable = false
         border = BorderFactory.createMatteBorder(0, 0, 1, 0, UIManager.getColor("Component.borderColor"))
+
+        // Interaction tools (radio group): Move (default) vs Box Select (rubber band).
+        val toolGroup = ButtonGroup()
+        val moveTool = toolToggle("Move", "Move: select, drag, resize and rotate elements", SvgEditorPanel.Tool.MOVE)
+        val marqueeTool = toolToggle("Box Select", "Box Select: drag a rectangle to select", SvgEditorPanel.Tool.MARQUEE)
+        fun wire(b: JToggleButton, tool: SvgEditorPanel.Tool) {
+            b.addActionListener {
+                if (b.isSelected) panel.setTool(tool)
+                else if (panel.getTool() == tool) b.isSelected = true // radio: never empty
+            }
+        }
+        toolGroup.add(moveTool)
+        toolGroup.add(marqueeTool)
+        wire(moveTool, SvgEditorPanel.Tool.MOVE)
+        wire(marqueeTool, SvgEditorPanel.Tool.MARQUEE)
+        add(moveTool)
+        add(marqueeTool)
+        addSeparator(Dimension(8, 0))
 
         if (actions.onOpen != null) add(button(EditorIcon.OPEN, "Open", "Open SVG file", actions.onOpen))
         if (actions.onSave != null) add(button(EditorIcon.SAVE, "Save", "Save SVG file", actions.onSave))
