@@ -90,4 +90,21 @@ class SvgEditorPanelTest {
         panel.actualSize()
         assertEquals(100.0, panel.getZoomPercent().toDouble(), 1.0)
     }
+
+    @Test
+    fun `zooming never grows the canvas past the viewport so no scrollbars appear`() {
+        val panel = SvgEditorPanel(IdAwareSvgRenderer())
+        panel.debugSetViewportSize(620, 460)
+        panel.loadSvg(Samples.SIMPLE)
+        val start = panel.debugCanvas().preferredSize
+        assertEquals(620, start.width)
+        assertEquals(460, start.height)
+        // Zoom in far enough that the 200x120 doc overflows a 620x460 viewport.
+        repeat(8) { panel.zoomIn() }
+        val after = panel.debugCanvas().preferredSize
+        // The canvas stays pinned to the fixed viewport: zoom only changes the visible framing,
+        // it never lets the document outgrow the panel (and so never introduces scrollbars).
+        assertEquals(620, after.width, "canvas width must stay pinned to the viewport while zooming")
+        assertEquals(460, after.height, "canvas height must stay pinned to the viewport while zooming")
+    }
 }

@@ -250,8 +250,11 @@ class SvgEditorPanel(
             },
         )
         scrollPane.border = null
-        scrollPane.verticalScrollBarPolicy = JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED
-        scrollPane.horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED
+        // The canvas is pinned to the viewport (its preferred size == the viewport), so the doc
+        // never outgrows the pane — disable scrollbars entirely. Zooming frames the fixed
+        // viewport; panning is done by moving the draw origin (see [panTo]).
+        scrollPane.verticalScrollBarPolicy = JScrollPane.VERTICAL_SCROLLBAR_NEVER
+        scrollPane.horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
         add(scrollPane, BorderLayout.CENTER)
         installMouse()
         installKeys()
@@ -735,7 +738,11 @@ class SvgEditorPanel(
             ?: canvas.height.takeIf { it > 0 }
             ?: 0
 
-    /** Recompute viewScale + offset + canvas preferred size from the current zoom. */
+    /** Recompute viewScale + offset + canvas size from the current zoom and reset any pan.
+     *
+     * The canvas is always exactly the size of the (scroll-pane) viewport, so no scrollbars ever
+     * appear: the document is centred inside the fixed viewport and, when zoomed larger than it,
+     * is simply clipped. Panning moves [offsetX]/[offsetY] directly (see [panTo]). */
     private fun recomputeView() {
         val w = engine.layout.width
         val h = engine.layout.height
@@ -745,14 +752,27 @@ class SvgEditorPanel(
         if (cw <= 0 || ch <= 0) return
         val fit = ((cw - 2 * pad) / w).coerceAtMost((ch - 2 * pad) / h).coerceAtLeast(0.01)
         viewScale = fit * zoom
+        // Fit-to-view is the resting state: centre the document and drop any prior pan.
         offsetX = (cw - w * viewScale) / 2.0
         offsetY = (ch - h * viewScale) / 2.0
-        canvas.preferredSize =
-            Dimension(
-                (w * viewScale).toInt().coerceAtLeast(1),
-                (h * viewScale).toInt().coerceAtLeast(1),
-            )
+        canvas.preferredSize = Dimension(cw.coerceAtLeast(1), ch.coerceAtLeast(1))
         canvas.revalidate()
+    }
+
+    /** Keep [offsetX]/[offsetY] within the fixed viewport: when the zoomed document fits the
+     * viewport it stays centred; when it overflows, clamp so the content always covers the
+     * visible area (and the user can pan across it) instead of drifting off-screen. */
+    private fun clampOffset() {
+        val w = engine.layout.width
+        val h = engine.layout.height
+        if (w <= 0 || h <= 0) return
+        val cw = viewW()
+        val ch = viewH()
+        if (cw <= 0 || ch <= 0) return
+        val dw = w * viewScale
+        val dh = h * viewScale
+        offsetX = if (dw <= cw) (cw - dw) / 2.0 else offsetX.coerceIn(cw - dw, 0.0)
+        offsetY = if (dh <= ch) (ch - dh) / 2.0 else offsetY.coerceIn(ch - dh, 0.0)
     }
 
     /** Zoom by `factor`, keeping the SVG point under `(ax, ay)` (panel px) fixed when given. */
@@ -781,11 +801,9 @@ class SvgEditorPanel(
             offsetX = (cw - w * viewScale) / 2.0
             offsetY = (ch - h * viewScale) / 2.0
         }
-        canvas.preferredSize =
-            Dimension(
-                (w * viewScale).toInt().coerceAtLeast(1),
-                (h * viewScale).toInt().coerceAtLeast(1),
-            )
+        clampOffset()
+        // The canvas is pinned to the fixed viewport (no scrollbars), so its pref size never
+        // needs to grow with zoom — only the visible framing changes.
         canvas.revalidate()
         // Instant feedback while zooming: freeze the current sidecar frame and paste it under
         // the new view transform until the crisp re-render lands. A viewport frame moves with
@@ -884,12 +902,12 @@ class SvgEditorPanel(
         }
     }
 
-    /** Plain wheel = scroll the preview viewport (Shift = horizontal), mirroring a normal editor. */
+    /** Plain wheel = pan the document (Shift = horizontal); no scrollbars exist in this view. */
     private fun scrollViewportByWheel(e: MouseWheelEvent) {
-        val bar =
-            if (e.isShiftDown) scrollPane.horizontalScrollBar else scrollPane.verticalScrollBar
         val delta = e.wheelRotation * e.scrollAmount * 3
-        bar.value = (bar.value + delta).coerceIn(bar.minimum, bar.maximum - bar.visibleAmount)
+        if (e.isShiftDown) offsetX -= delta else offsetY -= delta
+        clampOffset()
+        canvas.repaint()
     }
 
     private fun installKeys() {
@@ -916,14 +934,14 @@ class SvgEditorPanel(
 
     private fun panTo(p: Point) {
         val last = panLast ?: return
-        val vp = scrollPane.viewport
-        val pos = vp.viewPosition
-        vp.viewPosition =
-            Point(
-                (pos.x + last.x - p.x).coerceAtLeast(0),
-                (pos.y + last.y - p.y).coerceAtLeast(0),
-            )
+        // Pan by moving the draw origin directly. The canvas is pinned to the viewport, so the
+        // doc no longer grows past it (no scrollbars); [clampOffset] keeps the content inside.
+        offsetX += last.x - p.x
+        offsetY += last.y - p.y
+        clampOffset()
         panLast = p
+        canvas.repaint()
+        emitStatus()
     }
 
     private fun updateCursor() {
