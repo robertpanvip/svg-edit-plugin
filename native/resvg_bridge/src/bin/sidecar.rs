@@ -9,7 +9,7 @@
 //!
 //! Methods:
 //!
-//! - `ping` → `{"version":"0.4.0","protocol":1}`
+//! - `ping` → `{"version":"0.5.0","protocol":1}`
 //! - `open` `{svg}` → layout `{width,height,elements:[{nodeId,id,tag,x,y,w,h}]}`
 //!   (`id` is the user's id or null; coordinates are root-space)
 //! - `hitTest` `{x,y,tol?}` → `{"nodeId":N}` or `{}` (topmost wins)
