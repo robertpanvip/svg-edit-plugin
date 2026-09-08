@@ -1,0 +1,252 @@
+package com.pan.svg.core
+
+/**
+ * The editor engine: the single source of truth that wires `resvg` rendering, layout
+ * extraction and source-level editing together.
+ *
+ * It is deliberately IntelliJ/Swing-free — the plugin panel only reads `png` / `layout`
+ * and calls [moveElement] / [setElementBox]. This keeps the whole engine unit-testable on a
+ * plain JVM.
+ *
+ * Two rendering paths:
+ *  - [reload] re-parses the SVG (used on load / after an edit). It renders at the **last
+ *    requested device size** so re-renders stay sharp (the panel drives this size from the
+ *    panel's true pixel resolution + DPI, eliminating the upscaling blur).
+ *  - [renderAt] re-renders the PNG at an explicit device-pixel size without re-parsing the
+ *    layout (used on zoom / resize for a crisp, fast redraw).
+ */
+class SvgEditorEngine(
+    private val renderer: SvgRenderer,
+) {
+    var svg: String = ""
+        private set
+
+    /** Current SVG source (after edits). */
+    val svgSource: String get() = svg
+    var layout: SvgLayout = SvgLayout(0.0, 0.0, emptyList())
+        private set
+    var png: ByteArray = ByteArray(0)
+        private set
+    var imageWidth: Int = 0
+        private set
+    var imageHeight: Int = 0
+        private set
+
+    /** Last requested render pixel size (0 = natural size). Keeps re-renders crisp. */
+    private var renderW = 0
+    private var renderH = 0
+
+    /**
+     * Geometry captured at [load]: for each element id, its original absolute transform and
+     * bounding box. Resize editing rewrites the transform relative to this, so repeated
+     * edits stay consistent regardless of prior moves/scales.
+     */
+    private val geom = mutableMapOf<String, Pair<DoubleArray, InteractionController.Box>>()
+
+    fun load(svgText: String) {
+        svg = svgText
+        renderW = 0
+        renderH = 0
+        reloadLayoutEditable()
+        render()
+        captureGeom()
+    }
+
+    /**
+     * Load an SVG **without rasterizing it** — parse the source, extract the layout and capture
+     * the original geometry. The panel (which owns all raster production) immediately requests a
+     * content render through its own pipeline; the engine stays a fast, Swing-free source of
+     * truth for model + layout + edits.
+     */
+    fun loadLayoutOnly(svgText: String) {
+        svg = svgText
+        renderW = 0
+        renderH = 0
+        reloadLayoutEditable()
+        captureGeom()
+    }
+
+    /** Re-parse the layout from the current source. Never rasterizes. */
+    private fun reloadLayout() {
+        layout = SvgLayout.parse(renderer.layoutJson(svg))
+    }
+
+    /**
+     * Re-parse the layout after making the source fully editable: elements without an `id`
+     * attribute are reported by `usvg` with an empty id. They are still hit-testable, but every
+     * source-level edit locates its target by `id="..."` and would silently fail — the element
+     * snaps back to its original position on mouse-up (the drag layers break the same way).
+     * Synthetic ids are assigned once at load so every hit-testable element has a source anchor;
+     * documents whose elements all carry ids stay byte-for-byte identical.
+     */
+    private fun reloadLayoutEditable() {
+        reloadLayout()
+        if (layout.elements.none { it.id.isBlank() }) return
+        val patched = SvgUtils.ensureElementIds(svg)
+        if (patched != svg) {
+            svg = patched
+            reloadLayout()
+        }
+    }
+
+    private fun render() {
+        val r = renderer.render(svg, renderW, renderH)
+        png = r.png
+        imageWidth = r.width
+        imageHeight = r.height
+    }
+
+    /**
+     * Re-render the PNG at an explicit device-pixel size (the panel computes this from the
+     * canvas resolution × DPI so the result is 1:1 on screen → no aliasing). Layout is
+     * unchanged by a pure re-render.
+     */
+    fun renderAt(
+        w: Int,
+        h: Int,
+    ) {
+        require(w > 0 && h > 0) { "render size must be positive" }
+        renderW = w
+        renderH = h
+        val r = renderer.render(svg, w, h)
+        png = r.png
+        imageWidth = r.width
+        imageHeight = r.height
+    }
+
+    private fun captureGeom() {
+        geom.clear()
+        for (el in layout.elements) {
+            if (el.id.isBlank()) continue
+            geom[el.id] = el.transform.copyOf(6) to
+                InteractionController.Box(el.x, el.y, el.width, el.height)
+        }
+    }
+
+    /**
+     * Move an element (by its SVG `id`) by `(dx, dy)` **canvas (root) units**, then re-render.
+     *
+     * Prepending a plain `translate(dx, dy)` to the element's own transform moves it in its
+     * *local* space, which an ancestor group then scales/rotates — so the committed position
+     * drifts from the drag preview (computed in root space). That drift is exactly the "the box
+     * jumps on release" symptom for transformed/nested elements.
+     *
+     * The fix: prepend `P = G⁻¹ ∘ Translate(dx,dy) ∘ G`, where `G` is the element's ancestor-group
+     * transform (parsed from the source). Prepending `P` to the element's own transform makes its
+     * absolute transform become `Translate(dx,dy) ∘ G ∘ E`, i.e. the element moves by exactly
+     * `(dx, dy)` in root space — matching the preview — whether or not the element or its groups
+     * carry scale/rotation.
+     */
+    fun moveElement(
+        id: String,
+        dx: Double,
+        dy: Double,
+    ): Boolean {
+        if (dx == 0.0 && dy == 0.0) return false
+        if (layout.byId(id) == null) return false
+        val g = SvgUtils.ancestorTransform(svg, id) // ancestor group transform (root space)
+        val gInv = SvgUtils.affineInverse(g)
+        val t = doubleArrayOf(1.0, 0.0, 0.0, 1.0, dx, dy)
+        // P = G⁻¹ ∘ T ∘ G : applied to the element's own transform, this moves it by (dx,dy) in
+        // root/canvas space regardless of any group scale/rotation or the element's own transform.
+        val p = SvgUtils.affineMultiply(gInv, SvgUtils.affineMultiply(t, g))
+        // Emit a plain translate when the move is a pure translation (no group scale/rotation) so
+        // the source stays human-readable and existing translate-based edits keep working.
+        val pStr =
+            if (SvgUtils.isTranslationMatrix(p)) {
+                "translate(${SvgUtils.fmt(p[4])}, ${SvgUtils.fmt(p[5])})"
+            } else {
+                SvgUtils.matrixAttr(p)
+            }
+        val updated = SvgUtils.prependMatrix(svg, id, pStr)
+        if (updated == svg) return false
+        svg = updated
+        reloadLayout()
+        return true
+    }
+
+    /**
+     * Rotate the element about the canvas-space point `(cx, cy)` by `angleDeg` degrees. The
+     * rotation is PREPENDED to the element's existing transform, so repeated rotations compose
+     * (each is about the element's centre, which never moves under rotation) and any prior
+     * translate/scale is preserved.
+     */
+    fun rotateElement(
+        id: String,
+        angleDeg: Double,
+        cx: Double,
+        cy: Double,
+    ): Boolean {
+        if (angleDeg == 0.0) return false
+        val updated = SvgUtils.prependRotate(svg, id, angleDeg, cx, cy)
+        if (updated == svg) return false
+        svg = updated
+        reloadLayout()
+        return true
+    }
+
+    /**
+     * Resize/move an element so its absolute bounding box becomes `(x, y, w, h)` (SVG units).
+     * Implemented by PREPENDING a `matrix(...)` that maps the element's CURRENT box onto the
+     * target box, so the edit composes with any prior transform (translate/rotate/scale) instead
+     * of overwriting it — e.g. rotating then resizing keeps the rotation.
+     */
+    fun setElementBox(
+        id: String,
+        x: Double,
+        y: Double,
+        w: Double,
+        h: Double,
+    ): Boolean {
+        if (w <= 0 || h <= 0) return false
+        val el = layout.byId(id) ?: return false
+        val cbw = el.width
+        val cbh = el.height
+        if (cbw <= 0 || cbh <= 0) return false
+        val sx = w / cbw
+        val sy = h / cbh
+        // Affine maps the current box -> the target box (scale then translate).
+        val xform =
+            doubleArrayOf(
+                sx,
+                0.0,
+                0.0,
+                sy,
+                x - sx * el.x,
+                y - sy * el.y,
+            )
+        val attr = SvgUtils.matrixAttr(xform)
+        val updated = SvgUtils.prependMatrix(svg, id, attr)
+        if (updated == svg) return false
+        svg = updated
+        reloadLayout()
+        return true
+    }
+
+    /**
+     * Swap in a round-trip SVG text produced by the sidecar together with its freshly parsed
+     * layout. Unlike the edit methods above this skips local re-parsing entirely — the layout
+     * arrives ready-made from the sidecar's editor tree, so both sides stay in lockstep.
+     */
+    fun adoptSource(text: String, newLayout: SvgLayout) {
+        svg = text
+        renderW = 0
+        renderH = 0
+        layout = newLayout
+        captureGeom()
+    }
+}
+
+/** Multiply two 2x3 affine matrices `[a,b,c,d,e,f]` (column-major: [[a,c,e],[b,d,f]]). */
+private fun affineMultiply(
+    m1: DoubleArray,
+    m2: DoubleArray,
+): DoubleArray {
+    val a = m1[0] * m2[0] + m1[2] * m2[1]
+    val b = m1[1] * m2[0] + m1[3] * m2[1]
+    val c = m1[0] * m2[2] + m1[2] * m2[3]
+    val d = m1[1] * m2[2] + m1[3] * m2[3]
+    val e = m1[0] * m2[4] + m1[2] * m2[5] + m1[4]
+    val f = m1[1] * m2[4] + m1[3] * m2[5] + m1[5]
+    return doubleArrayOf(a, b, c, d, e, f)
+}

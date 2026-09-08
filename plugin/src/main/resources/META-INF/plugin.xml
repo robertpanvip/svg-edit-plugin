@@ -1,5 +1,5 @@
 <idea-plugin>
-    <id>com.svgeditor</id>
+    <id>com.pan.svg</id>
     <name>SVG Editor</name>
     <version>0.1.0</version>
     <vendor email="dev@example.com" url="https://example.com">example</vendor>
@@ -11,14 +11,14 @@
     <extensions defaultExtensionNs="com.intellij">
         <toolWindow id="SVG Editor"
                     anchor="right"
-                    factoryClass="com.example.svgeditor.plugin.SvgEditorToolWindowFactory"/>
-        <fileEditorProvider implementation="com.example.svgeditor.plugin.SvgPreviewEditorProvider"
+                    factoryClass="com.pan.svg.plugin.SvgEditorToolWindowFactory"/>
+        <fileEditorProvider implementation="com.pan.svg.plugin.SvgPreviewEditorProvider"
                             order="last"/>
     </extensions>
 
     <actions>
         <action id="SvgEasy.OpenInDesigner"
-                class="com.example.svgeditor.plugin.OpenInSvgEasyAction"
+                class="com.pan.svg.plugin.OpenInSvgEasyAction"
                 text="Open in SvgEasy Designer"
                 description="Open the SVG file in the SvgEasy text + design-canvas editor">
             <add-to-group group-id="EditorTabPopupMenu" anchor="last"/>

@@ -3,7 +3,7 @@ plugins {
     id("org.jetbrains.intellij.platform") version "2.1.0"
 }
 
-group = "com.example.svgeditor"
+group = "com.pan.svg"
 version = "0.4.0"
 
 repositories {
@@ -38,7 +38,7 @@ kotlin {
 
 intellijPlatform {
     pluginConfiguration {
-        id = "com.svgeditor"
+        id = "com.pan.svg"
         name = "SVG Editor"
         version = project.version as String
         vendor {

@@ -25,7 +25,7 @@ kotlin {
 
 application {
     // Top-level `fun main` in AppMain.kt -> class name `AppMainKt`.
-    mainClass.set("com.example.svgeditor.app.AppMainKt")
+    mainClass.set("com.pan.svg.app.AppMainKt")
 }
 
 // ---- Standalone executable packaging -------------------------------------------
@@ -87,7 +87,7 @@ val packageExe by tasks.registering(Exec::class) {
         "--name", "SvgEditor",
         "--input", stageDir.get().asFile.absolutePath,
         "--main-jar", tasks.jar.get().archiveFile.get().asFile.name,
-        "--main-class", "com.example.svgeditor.app.AppMainKt",
+        "--main-class", "com.pan.svg.app.AppMainKt",
         "--type", "app-image",
         "--dest", layout.buildDirectory.dir("dist").get().asFile.absolutePath,
         "--app-version", "0.1.0",

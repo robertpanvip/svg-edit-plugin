@@ -2,7 +2,7 @@ plugins {
    kotlin("jvm")
 }
 
-group = "com.example.svgeditor"
+group = "com.pan.svg"
 version = "0.3.2"
 
 repositories {
