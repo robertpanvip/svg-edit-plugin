@@ -3,10 +3,10 @@ package com.pan.svg.core
 /**
  * Mouse-interaction state machine for the editor panel.
  *
- * Interaction model (a conventional vector editor, Leafier-style):
- *  - Hover: pointer over an element highlights it (thin accent outline).
+ * Interaction model (a conventional vector editor, LeaferJS-style):
  *  - Select (single or double click): an element becomes "selected" and shows an edit box
- *    with 8 control points plus a rotate handle above it.
+ *    with 8 control points plus a rotate handle above it. Hover alone never highlights — the
+ *    hit test itself is path-exact (sidecar geometry), not bounding-box based.
  *  - Drag the body of a selected element: move it.
  *  - Drag a control point: resize it, anchored on the opposite corner.
  *  - Click empty space: deselect.

@@ -105,4 +105,39 @@ class SidecarPanelTest {
             panel.dispose()
         }
     }
+
+    @Test
+    fun `second drag after a commit does not grab the stale selection box`() {
+        FakeSidecar().use { fake ->
+            val panel = SvgEditorPanel(FakeSvgRenderer(), sidecar = fake)
+            panel.loadSvg(Samples.SIMPLE)
+            // After the first commit the adopted layout has box-a at (50,50) (moved +40,+40),
+            // while the controller's selection snapshot would still reference (10,10).
+            fake.commitElements =
+                listOf(
+                    linkedMapOf("nodeId" to 1L, "tag" to "rect", "id" to "bg", "x" to 0.0, "y" to 0.0, "w" to 200.0, "h" to 120.0),
+                    linkedMapOf("nodeId" to 2L, "tag" to "rect", "id" to "box-a", "x" to 50.0, "y" to 50.0, "w" to 80.0, "h" to 60.0),
+                    linkedMapOf("nodeId" to 3L, "tag" to "circle", "id" to "dot", "x" to 120.0, "y" to 30.0, "w" to 60.0, "h" to 60.0),
+                )
+            // Select and drag box-a from its old (10,10) spot by (+40,+40).
+            fake.hitNodeId = 2L
+            panel.debugDoubleClick(50, 40)
+            panel.debugDrag(Point(50, 40), Point(90, 80))
+            assertEquals(1, fake.count("commit"))
+            assertEquals("box-a", panel.selectedElementId)
+            val moved = panel.layout.byId("box-a")!!
+            assertEquals(50.0, moved.x, 1e-9)
+            assertEquals(50.0, moved.y, 1e-9)
+
+            // Second drag: press at (20,20), which only lies inside box-a's OLD bounding box
+            // (10..90 x 10..70) — after the move that area is empty. It must NOT start a move
+            // from the stale snapshot (which made the element jump under the cursor); pressing
+            // there now deselects instead.
+            fake.hitNodeId = null
+            panel.debugDrag(Point(20, 20), Point(21, 21))
+            assertEquals(1, fake.count("commit"), "a press on the vacated old box area must not move box-a")
+            assertNull(panel.selectedElementId)
+            panel.dispose()
+        }
+    }
 }

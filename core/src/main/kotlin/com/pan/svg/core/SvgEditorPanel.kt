@@ -24,7 +24,6 @@ import java.awt.geom.Ellipse2D
 import java.awt.geom.Line2D
 import java.awt.geom.Path2D
 import java.awt.geom.Rectangle2D
-import java.awt.geom.RoundRectangle2D
 import java.awt.image.BufferedImage
 import java.util.concurrent.Executors
 import javax.swing.JPanel
@@ -45,15 +44,18 @@ import javax.swing.Timer
  *  3. Wheel zoom / window resize only resample the existing bitmap for instant feedback;
  *     a 160 ms debounce timer then re-renders once at the new device resolution.
  *  4. Hovering an element pre-heats its drag layers (background / foreground) after 120 ms,
- *     so the first drag frame is already warm — press-and-drag never blocks.
+ *     so the first drag frame is already warm — press-and-drag never blocks. Hover draws
+ *     nothing (only the cursor changes); the selection frame appears after a click.
  *
  * Editing commits ([InteractionController] preview -> [SvgEditorEngine] edit) re-parse the
  * LAYOUT only; the raster refresh is scheduled through the same background pipeline.
  *
  * Interaction model:
- *  - hover highlight, click to select, LeaferJS-style accent frame with round handles + rotate grip
+ *  - click to select, LeaferJS-style accent frame with round handles + rotate grip
  *  - drag body = move, drag handle = resize, drag rotate grip = rotate (with snapping)
  *  - marquee selection on empty canvas (rubber-band, topmost element wins)
+ *  - hit tests are path-exact via the sidecar (equivalent to LeaferJS offscreen colour
+ *    picking): a pointer only targets an element whose filled/stroked geometry it touches
  *  - space / middle-mouse pans the scroll viewport, wheel zooms around the cursor
  *
  * Sync mode ([asyncRendering] = false, used by unit tests) performs every render inline so
@@ -978,6 +980,13 @@ class SvgEditorPanel(
     ) {
         val (ix, iy) = toImage(x, y)
         val tol = EditorTheme.HANDLE_TOLERANCE / viewScale
+        // Re-bind the controller's selection to the CURRENT layout before any geometry
+        // decision. After a committed edit the layout moved, but interaction.selected would
+        // otherwise still hold the pre-edit snapshot: pressing inside the overlap of old & new
+        // boxes re-uses the stale origin and the second drag starts with a visible jump.
+        interaction.selected?.let { sel ->
+            engine.layout.byId(sel.id)?.let { fresh -> interaction.selected = fresh }
+        }
         // The rotate handle (a circle above the selection box) takes priority.
         selectedId?.let { sid ->
             engine.layout.byId(sid)?.let { el ->
@@ -1315,7 +1324,6 @@ class SvgEditorPanel(
             staticDirty = true // ensure the next drag re-bakes with the current base raster
         }
 
-        drawHover(g)
         drawSelection(g)
         drawSnap(g)
         drawMarquee(g)
@@ -1515,20 +1523,10 @@ class SvgEditorPanel(
         }
     }
 
-    /** LeaferJS-style hover highlight: a soft rounded accent outline (float precision). */
-    private fun drawHover(g: Graphics2D) {
-        hoveredId?.takeIf { it != selectedId }?.let { engine.layout.byId(it) }?.let { el ->
-            val rx = offsetX + el.x * viewScale
-            val ry = offsetY + el.y * viewScale
-            val rw = el.width * viewScale
-            val rh = el.height * viewScale
-            g.color = EditorTheme.ACCENT_HOVER
-            g.stroke = BasicStroke(EditorTheme.STROKE)
-            g.draw(RoundRectangle2D.Double(rx, ry, rw, rh, 4.0, 4.0))
-        }
-    }
-
-    /** LeaferJS-style selection: float outline, round dot handles, rotate lever + grip. */
+    /**
+     * Selection overlay for the currently selected element: a rotated accent outline plus 8 round
+     * control handles. Drawn only after a click selects an element (hover never highlights).
+     */
     private fun drawSelection(g: Graphics2D) {
         selectedId?.let { id ->
             engine.layout.byId(id)?.let { el ->

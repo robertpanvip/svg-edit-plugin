@@ -6,16 +6,13 @@ import java.awt.Color
 /**
  * LeaferJS-flavoured visual language for the editor canvas.
  *
- * One place for every accent/overlay colour and metric so the selection UI, hover highlight,
- * snap guides and marquee share the same look, and hosts (IDEA plugin vs standalone app) can
- * re-tint the editor without touching interaction code.
+ * One place for every accent/overlay colour and metric so the selection UI, snap guides and
+ * marquee share the same look, and hosts (IDEA plugin vs standalone app) can re-tint the editor
+ * without touching interaction code.
  */
 object EditorTheme {
     /** Primary accent (LeaferJS violet). Selection outline, handles, marquee. */
     val ACCENT = Color(0x83, 0x6D, 0xFF)
-
-    /** Hover highlight: the accent at reduced alpha. */
-    val ACCENT_HOVER = Color(0x83, 0x6D, 0xFF, 120)
 
     /** Semi-transparent marquee fill (dashed accent border drawn on top). */
     val MARQUEE_FILL = Color(0x83, 0x6D, 0xFF, 22)
