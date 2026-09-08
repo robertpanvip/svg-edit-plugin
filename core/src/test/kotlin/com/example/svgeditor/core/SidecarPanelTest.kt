@@ -51,10 +51,13 @@ class SidecarPanelTest {
             val panel = SvgEditorPanel(FakeSvgRenderer(), sidecar = fake)
             panel.loadSvg(Samples.SIMPLE)
             fake.hitNodeId = 3L
+            val before = panel.svgSource
             panel.debugDoubleClick(50, 40)
             panel.debugDrag(Point(50, 40), Point(50, 40))
             assertEquals(0, fake.count("commit"))
-            assertFalse(panel.svgSource.contains("transform="))
+            // A zero-delta drag must not rewrite the document (note: the sample itself contains a
+            // `<g transform=...>`, so compare snapshots rather than searching for the substring).
+            assertEquals(before, panel.svgSource)
             panel.dispose()
         }
     }

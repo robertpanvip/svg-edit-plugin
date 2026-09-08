@@ -62,6 +62,30 @@ jobs:
           name: native-lib-${{ matrix.os }}
           path: native/resvg_bridge/target/release/libresvg_bridge.dylib
 
+      # The sidecar executable is bundled alongside the cdylib (one per OS). Linux/macOS share
+      # the file name, so CI stores them under target/sidecar/<os>/ and the plugin gradle task
+      # copies each into the jar's sidecar/<os>/ resource dir.
+      - name: Upload sidecar artifact (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v5
+        with:
+          name: native-sidecar-${{ matrix.os }}
+          path: native/resvg_bridge/target/release/svg_easy_sidecar
+
+      - name: Upload sidecar artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v5
+        with:
+          name: native-sidecar-${{ matrix.os }}
+          path: native/resvg_bridge/target/release/svg_easy_sidecar.exe
+
+      - name: Upload sidecar artifact (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v5
+        with:
+          name: native-sidecar-${{ matrix.os }}
+          path: native/resvg_bridge/target/release/svg_easy_sidecar
+
 
   build-plugin:
     name: Build IntelliJ Plugin
@@ -102,6 +126,27 @@ jobs:
         with:
           name: native-lib-macos-latest
           path: native/resvg_bridge/target/release/
+
+      # Download each OS's sidecar executable into a per-OS dir (Linux/macOS share the file
+      # name, so a flat release/ dir would clobber them). plugin/build.gradle.kts bundles
+      # target/sidecar/<os>/ into the jar's sidecar/<os>/ resource dir.
+      - name: Download sidecar (Linux)
+        uses: actions/download-artifact@v5
+        with:
+          name: native-sidecar-ubuntu-latest
+          path: native/resvg_bridge/target/sidecar/linux/
+
+      - name: Download sidecar (Windows)
+        uses: actions/download-artifact@v5
+        with:
+          name: native-sidecar-windows-latest
+          path: native/resvg_bridge/target/sidecar/windows/
+
+      - name: Download sidecar (macOS)
+        uses: actions/download-artifact@v5
+        with:
+          name: native-sidecar-macos-latest
+          path: native/resvg_bridge/target/sidecar/macos/
 
       # The committed gradlew has no executable bit (the GitHub contents API cannot set one),
       # so restore it here. Also guards against a truncated wrapper script.

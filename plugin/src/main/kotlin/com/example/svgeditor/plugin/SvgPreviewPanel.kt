@@ -1,5 +1,6 @@
 package com.example.svgeditor.plugin
 
+import com.example.svgeditor.core.SidecarClient
 import com.example.svgeditor.core.SvgEditorPanel
 import com.example.svgeditor.core.SvgRenderer
 import com.intellij.openapi.Disposable
@@ -63,6 +64,9 @@ class SvgPreviewPanel(
     private val document: Document? = FileDocumentManager.getInstance().getDocument(file)
     private var suppressReload = false
 
+    /** Owned by this editor: closed in [dispose] (the panel only borrows it). */
+    private var ownedSidecar: SidecarClient? = null
+
     /**
      * Null when the native renderer is unavailable (e.g. plugin zip built on another OS); in
      * that case the guide panel is shown instead of the canvas and editing is disabled until the
@@ -70,10 +74,20 @@ class SvgPreviewPanel(
      */
     private val panel: SvgEditorPanel? =
         SvgBridgeLoader.loadOrNull()?.let { renderer ->
-            SvgEditorPanel(renderer, asyncRendering = true).apply {
+            val sidecarClient = resolveSidecarClient()
+            SvgEditorPanel(renderer, asyncRendering = true, sidecar = sidecarClient).apply {
                 onEdit = { writeBack() }
             }
         }
+
+    /**
+     * Sidecar client for the document bound to this panel, or null when the executable is not
+     * bundled (the panel then runs the legacy in-process pipeline). Created once per editor.
+     */
+    private fun resolveSidecarClient(): SidecarClient? {
+        val command = SidecarLoader.resolveOrNull() ?: return null
+        return SidecarClient(listOf(command)).also { ownedSidecar = it }
+    }
 
     private val toolbar: JComponent? = panel?.let { SvgEasyToolbar.forPanel(it) }
 
@@ -110,13 +124,27 @@ class SvgPreviewPanel(
         object : DocumentListener {
             override fun documentChanged(event: DocumentEvent) {
                 if (suppressReload) return
-                loadSafely(event.document.text)
+                // Debounce: reload the canvas 300ms after the user stops typing so continuous
+                // editing does not re-parse/re-render on every keystroke. Text edits from the
+                // canvas write-back are suppressed above and never reach this path.
+                reloadDebounce.restart()
             }
 
             override fun beforeDocumentChange(event: DocumentEvent) {
                 // no-op; reload happens after the change is applied
             }
         }
+
+    /**
+     * Text -> canvas sync, debounced 300ms (the spec's "text edits mirror back to the canvas"
+     * direction): the heavy parse/render runs once the user pauses, never mid-keystroke.
+     */
+    private val reloadDebounce =
+        Timer(300) {
+            val doc = document ?: return@Timer
+            if (suppressReload) return@Timer
+            loadSafely(doc.text)
+        }.apply { isRepeats = false }
 
     init {
         if (panel != null) {
@@ -251,6 +279,9 @@ class SvgPreviewPanel(
 
     override fun dispose() {
         document?.removeDocumentListener(documentListener)
+        reloadDebounce.stop()
         panel?.dispose()
+        ownedSidecar?.close()
+        ownedSidecar = null
     }
 }

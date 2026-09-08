@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.example.svgeditor"
-version = "0.3.9"
+version = "0.4.0"
 
 repositories {
     maven("https://mirrors.cloud.tencent.com/nexus/repository/maven-public/")
@@ -106,6 +106,48 @@ intellijPlatform {
     }
     tasks.named("processResources") { dependsOn("copyNativeLibs") }
     tasks.named("buildPlugin") { dependsOn("processResources") }
+}
+
+// ---- Sidecar executable bundling ------------------------------------------------
+// The Rust `svg_easy_sidecar` binary is bundled per OS under resources/main/sidecar/<os>/
+// (Linux & macOS share the file name, so they must not share a jar root). SidecarLoader
+// extracts the right subdir at runtime. Optional: when no sidecar is present the plugin runs
+// the legacy in-process pipeline, so a missing binary is a NOTE, never a build failure.
+val sidecarBase = file("../native/resvg_bridge/target/sidecar")
+val osForSidecar =
+    mapOf(
+        "linux" to "svg_easy_sidecar",
+        "macos" to "svg_easy_sidecar",
+        "windows" to "svg_easy_sidecar.exe",
+    )
+val currentOsName = System.getProperty("os.name").lowercase()
+val currentOsKey =
+    when {
+        currentOsName.contains("win") -> "windows"
+        currentOsName.contains("mac") || currentOsName.contains("darwin") -> "macos"
+        else -> "linux"
+    }
+// Dev fallback: a locally `cargo build --release`d binary for the current OS lives at
+// target/release/svg_easy_sidecar; CI places cross builds under target/sidecar/<os>/.
+val sidecarFiles =
+    osForSidecar.mapNotNull { (os, name) ->
+        val dir = sidecarBase.resolve(os)
+        var found = dir.resolve(name).takeIf { it.isFile }
+        if (found == null && os == currentOsKey) {
+            found = file("../native/resvg_bridge/target/release/$name").takeIf { it.isFile }
+        }
+        if (found != null) println("Bundled sidecar: ${found.absolutePath} (os=$os)")
+        else println("NOTE: sidecar '$name' not found for os=$os (skipped)")
+        found?.let { os to it }
+    }
+if (sidecarFiles.isNotEmpty()) {
+    tasks.register<Copy>("copySidecarBinaries") {
+        sidecarFiles.forEach { (os, f) ->
+            from(f) { into("sidecar/$os") }
+        }
+        into(layout.buildDirectory.dir("resources/main"))
+    }
+    tasks.named("processResources") { dependsOn("copySidecarBinaries") }
 }
 
 // Rename the distributable zip. By default its base name is the Gradle subproject

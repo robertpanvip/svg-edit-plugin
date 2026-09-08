@@ -1,6 +1,7 @@
 package com.example.svgeditor.plugin
 
 import com.example.svgeditor.core.Samples
+import com.example.svgeditor.core.SidecarClient
 import com.example.svgeditor.core.SvgEditorPanel
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.fileEditor.FileDocumentManager
@@ -48,9 +49,12 @@ class SvgEditorToolWindowFactory : ToolWindowFactory {
         val renderer = SvgBridgeLoader.loadOrNull()
         val lifecycle = Disposable {}
         var panel: SvgEditorPanel? = null
+        var ownedSidecar: SidecarClient? = null
         val body: JComponent =
             if (renderer != null) {
-                val editorPanel = SvgEditorPanel(renderer, asyncRendering = true)
+                val sidecarCommand = SidecarLoader.resolveOrNull()
+                ownedSidecar = sidecarCommand?.let { SidecarClient(listOf(it)) }
+                val editorPanel = SvgEditorPanel(renderer, asyncRendering = true, sidecar = ownedSidecar)
                 panel = editorPanel
                 val toolbar = SvgEasyToolbar.forPanel(editorPanel)
                 val editorView =
@@ -131,6 +135,7 @@ class SvgEditorToolWindowFactory : ToolWindowFactory {
             Disposable {
                 Disposer.dispose(lifecycle)
                 panel?.dispose()
+                ownedSidecar?.close()
             },
         )
         toolWindow.contentManager.addContent(content)
