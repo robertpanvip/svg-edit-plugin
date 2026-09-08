@@ -94,6 +94,16 @@ class InteractionController {
     private var snapXTarget: Double? = null
     private var snapYTarget: Double? = null
 
+    /**
+     * Optional exact hit test wired by the panel when the sidecar is active. Receives
+     * canvas-space pointer coordinates; when null the local bounding-box fallback is used.
+     */
+    var preciseHitTest: ((x: Double, y: Double) -> SvgElement?)? = null
+
+    /** Exact sidecar hit test when wired, else the local bounding-box detector. */
+    private fun hitTest(layout: SvgLayout, x: Double, y: Double): SvgElement? =
+        preciseHitTest?.invoke(x, y) ?: CollisionDetector.hitTest(layout, x, y)
+
     /** Pointer moved with no button pressed: refresh hover (+ which handle is under it). */
     fun onHoverMove(
         layout: SvgLayout,
@@ -104,7 +114,7 @@ class InteractionController {
         pointerX = x
         pointerY = y
         if (state == State.DRAG) return null
-        hovered = CollisionDetector.hitTest(layout, x, y)
+        hovered = hitTest(layout, x, y)
         selectedHandle = selected?.let { handleAt(it, x, y, tol) }
         return hovered
     }
@@ -116,7 +126,7 @@ class InteractionController {
         y: Double,
     ): Boolean {
         snapLines = emptyList()
-        val hit = CollisionDetector.hitTest(layout, x, y)
+        val hit = hitTest(layout, x, y)
         return if (hit != null) {
             selected = hit
             selectedHandle = null
@@ -192,7 +202,7 @@ class InteractionController {
                 return true
             }
         }
-        val hit = CollisionDetector.hitTest(layout, x, y)
+        val hit = hitTest(layout, x, y)
         return if (hit != null) {
             // Leafier/Figma-style: pressing on an element immediately starts a MOVE drag.
             // If the user releases without moving, onMouseReleased sees a null previewBox and

@@ -65,9 +65,12 @@ import javax.swing.Timer
 class SvgEditorPanel(
     private val renderer: SvgRenderer,
     asyncRendering: Boolean = false,
+    private val sidecar: SidecarClient? = null,
 ) : JPanel() {
     private val engine = SvgEditorEngine(renderer)
-    private val interaction = InteractionController()
+    private val interaction = InteractionController().apply {
+        preciseHitTest = { x, y -> hitTestAt(x, y) }
+    }
 
     /** Single background producer for all rasters; null = synchronous test mode. */
     private val scheduler: RenderScheduler? =
@@ -102,6 +105,18 @@ class SvgEditorPanel(
     private var staticDirty = true
     private var staticDrag = false
     private var staticBgColor: Color? = null
+
+    /** Sidecar-rendered content frame for the current view; null = legacy in-process raster. */
+    private var vpImage: BufferedImage? = null
+
+    /** True when [vpImage] is a viewport frame (pasted at 0,0); false = full-canvas region frame. */
+    private var vpViewportMode = false
+
+    /** Frozen zoom snapshot shown during wheel/resize bursts until the crisp frame lands. */
+    private var vpPreview: VpPreview? = null
+
+    /** Cleared after the sidecar fails at load time; everything then runs the legacy pipeline. */
+    private var sidecarActive = sidecar != null
 
     private var viewScale = 1.0
     private var offsetX = 0.0
@@ -141,6 +156,21 @@ class SvgEditorPanel(
      * Hosts that bind the panel to a document use this to write the updated [svgSource] back.
      */
     var onEdit: (() -> Unit)? = null
+
+    /** View parameters for one sidecar content frame (Rust maps px = svg*scale + tx). */
+    private data class VpTag(
+        val vw: Int,
+        val vh: Int,
+        val scale: Double,
+        val tx: Double,
+        val ty: Double,
+    )
+
+    /** Frozen zoom snapshot: the last content frame + the transform that displays it at the new zoom. */
+    private class VpPreview(
+        val img: BufferedImage,
+        val at: AffineTransform,
+    )
 
     private class RenderTag(
         val svg: String,
@@ -228,7 +258,19 @@ class SvgEditorPanel(
     // ---- public API -------------------------------------------------------
 
     fun loadSvg(text: String) {
-        engine.loadLayoutOnly(text)
+        val sc = sidecar
+        if (sc != null && sidecarActive) {
+            try {
+                engine.adoptSource(text, sc.open(text))
+            } catch (e: Exception) {
+                // Sidecar unusable (missing binary / crashed) -> permanent fallback to the
+                // legacy in-process pipeline so the panel stays fully functional.
+                sidecarActive = false
+                engine.loadLayoutOnly(text)
+            }
+        } else {
+            engine.loadLayoutOnly(text)
+        }
         selectedId = null
         hoveredId = null
         pendingHoverId = null
@@ -308,7 +350,7 @@ class SvgEditorPanel(
         panelY: Int,
     ): String? {
         val (ix, iy) = toImage(panelX, panelY)
-        return CollisionDetector.hitTest(engine.layout, ix, iy)?.id
+        return hitTestAt(ix, iy)?.id
     }
 
     /** Test hook: the inner canvas component (for synthetic event dispatch in tests). */
@@ -319,9 +361,26 @@ class SvgEditorPanel(
         crispTimer?.stop()
         preheatTimer?.stop()
         scheduler?.dispose()
+        // The sidecar process is owned by the host (plugin), not by this panel.
     }
 
     // ---- internals: render pipeline ---------------------------------------
+
+    /**
+     * Canvas-space hit test: exact path hit via the sidecar when active (element ids are
+     * normalized to node-id strings so selection keys stay unique), else the local
+     * bounding-box detector.
+     */
+    private fun hitTestAt(ix: Double, iy: Double): SvgElement? {
+        val sc = sidecar
+        if (sc != null && sidecarActive) {
+            val tol = EditorTheme.HANDLE_TOLERANCE / viewScale
+            val nodeId = sc.hitTest(ix, iy, tol) ?: return null
+            val el = engine.layout.byNodeId(nodeId) ?: return null
+            return el.copy(id = el.id.ifBlank { nodeId.toString() })
+        }
+        return CollisionDetector.hitTest(engine.layout, ix, iy)
+    }
 
     /** Logical unit -> device pixels at the current zoom + DPI. */
     private fun devicePx(u: Double): Int = kotlin.math.max(1, kotlin.math.round(u * viewScale * dpiScale).toInt())
@@ -346,8 +405,15 @@ class SvgEditorPanel(
     }
 
     private fun requestContent() {
+        val sc = sidecar
+        if (sc != null && sidecarActive) {
+            requestContentViewport(sc)
+            return
+        }
         if (scheduler == null) {
             offscreen = renderNow()
+            vpImage = null
+            vpPreview = null
             return
         }
         val tag = RenderTag(engine.svgSource, devicePx(engine.layout.width), devicePx(engine.layout.height))
@@ -377,6 +443,8 @@ class SvgEditorPanel(
             ) {
                 if (result != null) {
                     offscreen = result
+                    vpImage = null
+                    vpPreview = null
                     staticDirty = true
                     canvas.repaint()
                 } else {
@@ -384,6 +452,70 @@ class SvgEditorPanel(
                     lastRenderError?.let { onRenderError?.invoke(it) }
                 }
             }
+        }
+    }
+
+    /**
+     * Sidecar content frame for the current view. Two modes:
+     *  - viewport mode (the canvas fits the viewport): render exactly the visible viewport
+     *    at device resolution and paste it at (0,0) — viewBox-level zooming, never a
+     *    stretched bitmap, however deep the zoom;
+     *  - region mode (canvas larger than the viewport): render the full canvas exactly like
+     *    the legacy offscreen (tx=ty=0), so `drawScaled` pastes it at the pan offset.
+     */
+    private fun requestContentViewport(sc: SidecarClient) {
+        val wanted = contentParams() ?: return
+        val isViewport = vpViewportMode
+        val task = {
+            try {
+                sc.renderViewport(wanted.vw, wanted.vh, wanted.scale, wanted.tx, wanted.ty)
+            } catch (t: Throwable) {
+                lastRenderError = t
+                null
+            }
+        }
+        val apply: (BufferedImage?) -> Unit = { result ->
+            if (result != null && contentParams() == wanted && vpViewportMode == isViewport) {
+                vpImage = result
+                offscreen = null
+                vpPreview = null
+                staticDirty = true
+                canvas.repaint()
+            } else if (result == null) {
+                lastRenderError?.let { onRenderError?.invoke(it) }
+            }
+        }
+        if (scheduler == null) {
+            apply(task())
+            return
+        }
+        scheduler.submit(RenderScheduler.Slot.CONTENT, wanted, task) { result, _ -> apply(result) }
+    }
+
+    /** Current view parameters for a sidecar frame; also refreshes [vpViewportMode]. */
+    private fun contentParams(): VpTag? {
+        val w = engine.layout.width
+        val h = engine.layout.height
+        if (w <= 0 || h <= 0) return null
+        val dpr = dpiScale
+        return if (w * viewScale <= viewW() && h * viewScale <= viewH()) {
+            vpViewportMode = true
+            VpTag(
+                vw = kotlin.math.max(1, kotlin.math.round(viewW() * dpr).toInt()),
+                vh = kotlin.math.max(1, kotlin.math.round(viewH() * dpr).toInt()),
+                scale = viewScale * dpr,
+                tx = offsetX * dpr,
+                ty = offsetY * dpr,
+            )
+        } else {
+            vpViewportMode = false
+            VpTag(
+                vw = devicePx(w),
+                vh = devicePx(h),
+                scale = viewScale * dpr,
+                tx = 0.0,
+                ty = 0.0,
+            )
         }
     }
 
@@ -406,6 +538,11 @@ class SvgEditorPanel(
      * both renders share ONE background job so they always arrive as a consistent pair.
      */
     private fun requestLayers(id: String) {
+        val sc = sidecar
+        if (sc != null && sidecarActive) {
+            requestLayersSidecar(sc, id)
+            return
+        }
         if (scheduler == null) {
             rebuildLayersSync(id)
             return
@@ -435,6 +572,50 @@ class SvgEditorPanel(
                 canvas.repaint()
             }
         }
+    }
+
+    /**
+     * Sidecar drag layers: a single startDrag round-trip returns the element-hidden background
+     * and the element-only ghost, pre-rendered by Rust at full device resolution with region-mode
+     * parameters (tx=ty=0), so the legacy buildFgCrop / static-layer math applies unchanged.
+     */
+    private fun requestLayersSidecar(
+        sc: SidecarClient,
+        id: String,
+    ) {
+        val el = engine.layout.byId(id) ?: return
+        val nodeId = el.nodeId
+        val w = engine.layout.width
+        val h = engine.layout.height
+        if (nodeId == 0L || w <= 0.0 || h <= 0.0) return
+        val tag = LayerTag(engine.svgSource, id, devicePx(w), devicePx(h))
+        wantedLayer = tag
+        val dpr = dpiScale
+        val task = {
+            try {
+                sc.startDrag(nodeId, tag.w, tag.h, viewScale * dpr, 0.0, 0.0)
+            } catch (t: Throwable) {
+                lastRenderError = t
+                null
+            }
+        }
+        val apply: (SidecarDragImages?) -> Unit = { result ->
+            if (result != null && wantedLayer === tag && tag.svg === engine.svgSource) {
+                layerId = id
+                bgImage = result.background
+                fgImage = result.ghost
+                buildFgCrop()
+                staticDirty = true
+                canvas.repaint()
+            } else if (result == null) {
+                lastRenderError?.let { onRenderError?.invoke(it) }
+            }
+        }
+        if (scheduler == null) {
+            apply(task())
+            return
+        }
+        scheduler.submit(RenderScheduler.Slot.LAYERS, tag, task) { result, _ -> apply(result) }
     }
 
     private fun rebuildLayersSync(id: String) {
@@ -505,6 +686,15 @@ class SvgEditorPanel(
      * device resolution and re-warm the next drag.
      */
     private fun refreshAfterEdit(id: String) {
+        if (sidecarActive) {
+            // Sidecar path: the committed frame already replaced the content raster inside
+            // commitSidecar — just drop the stale drag layers and re-warm them.
+            clearLayers()
+            staticDirty = true
+            requestLayers(id)
+            canvas.repaint()
+            return
+        }
         if (scheduler == null) {
             offscreen = renderNow()
             rebuildLayersSync(id)
@@ -575,6 +765,8 @@ class SvgEditorPanel(
         val cw = viewW().takeIf { it > 0 } ?: 640
         val ch = viewH().takeIf { it > 0 } ?: 420
         val oldView = viewScale
+        val oldOffsetX = offsetX
+        val oldOffsetY = offsetY
         val svgX = if (ax != null) (ax - offsetX) / oldView else null
         val svgY = if (ay != null) (ay - offsetY) / oldView else null
         zoom = (zoom * factor).coerceIn(0.1, 16.0)
@@ -593,6 +785,24 @@ class SvgEditorPanel(
                 (h * viewScale).toInt().coerceAtLeast(1),
             )
         canvas.revalidate()
+        // Instant feedback while zooming: freeze the current sidecar frame and paste it under
+        // the new view transform until the crisp re-render lands. A viewport frame moves with
+        // the old pan, so it needs the −k·oldOffset correction; a region frame is pasted at the
+        // plain new pan. Both keep the SVG point under the cursor visually fixed.
+        if (scheduler != null && oldView > 0.0 && viewScale > 0.0 && oldView != viewScale) {
+            val src = vpImage ?: offscreen
+            if (src != null) {
+                val k = viewScale / oldView
+                val at = AffineTransform()
+                if (src === vpImage && vpViewportMode) {
+                    at.translate(offsetX - k * oldOffsetX, offsetY - k * oldOffsetY)
+                } else {
+                    at.translate(offsetX, offsetY)
+                }
+                at.scale(k / dpiScale, k / dpiScale)
+                vpPreview = VpPreview(src, at)
+            }
+        }
         // Instant feedback: the existing bitmap is resampled by drawScaled. One crisp
         // re-render follows once the wheel/resize burst settles.
         if (scheduler != null) crispTimer?.restart() else renderAtDeviceSize()
@@ -787,7 +997,7 @@ class SvgEditorPanel(
         }
         // Empty canvas away from the current selection's handles: start a marquee (and clear
         // the selection, preserving the click-empty-deselect behavior for <3px drags).
-        val hit = CollisionDetector.hitTest(engine.layout, ix, iy)
+        val hit = hitTestAt(ix, iy)
         if (hit == null && !nearSelectionHandles(x, y)) {
             marqueeOrigin = Point(x, y)
             marqueeRect = null
@@ -881,17 +1091,19 @@ class SvgEditorPanel(
         var committed = false
         when (res) {
             is InteractionController.EditResult.Move -> {
-                committed = engine.moveElement(res.element.id, res.dx, res.dy)
+                committed = commitSidecar(res) ?: engine.moveElement(res.element.id, res.dx, res.dy)
                 selectedId = res.element.id
                 if (committed) refreshAfterEdit(res.element.id)
             }
             is InteractionController.EditResult.Resize -> {
-                committed = engine.setElementBox(res.element.id, res.x, res.y, res.w, res.h)
+                committed =
+                    commitSidecar(res) ?: engine.setElementBox(res.element.id, res.x, res.y, res.w, res.h)
                 selectedId = res.element.id
                 if (committed) refreshAfterEdit(res.element.id)
             }
             is InteractionController.EditResult.Rotate -> {
-                committed = engine.rotateElement(res.element.id, res.angle, res.cx, res.cy)
+                committed =
+                    commitSidecar(res) ?: engine.rotateElement(res.element.id, res.angle, res.cx, res.cy)
                 selectedId = res.element.id
                 if (committed) refreshAfterEdit(res.element.id)
             }
@@ -903,6 +1115,80 @@ class SvgEditorPanel(
         staticDirty = true
         canvas.repaint()
         emitStatus()
+    }
+
+    /**
+     * Commit an edit through the sidecar (Rust writes `transform`, returns the round-trip SVG
+     * and the re-rendered frame). Returns null when the sidecar path is unavailable (the legacy
+     * engine edit applies instead), otherwise whether the edit was committed. On failure the
+     * sidecar is permanently retired ([sidecarActive] = false) and the panel falls back — the
+     * drag simply "does not stick" instead of corrupting the document.
+     */
+    private fun commitSidecar(res: InteractionController.EditResult): Boolean? {
+        val nodeId =
+            when (res) {
+                is InteractionController.EditResult.Move -> res.element.nodeId
+                is InteractionController.EditResult.Resize -> res.element.nodeId
+                is InteractionController.EditResult.Rotate -> res.element.nodeId
+            }
+        val sc = sidecar
+        if (sc == null || !sidecarActive || nodeId == 0L) return null
+        val matrix: DoubleArray =
+            when (res) {
+                is InteractionController.EditResult.Move ->
+                    doubleArrayOf(1.0, 0.0, 0.0, 1.0, res.dx, res.dy)
+                is InteractionController.EditResult.Resize -> {
+                    val el = res.element
+                    val sx = if (el.width > 0.0) res.w / el.width else 1.0
+                    val sy = if (el.height > 0.0) res.h / el.height else 1.0
+                    doubleArrayOf(sx, 0.0, 0.0, sy, res.x - sx * el.x, res.y - sy * el.y)
+                }
+                is InteractionController.EditResult.Rotate -> {
+                    val rad = Math.toRadians(res.angle)
+                    val c = kotlin.math.cos(rad)
+                    val s = kotlin.math.sin(rad)
+                    doubleArrayOf(
+                        c,
+                        s,
+                        -s,
+                        c,
+                        (1.0 - c) * res.cx + s * res.cy,
+                        (1.0 - c) * res.cy - s * res.cx,
+                    )
+                }
+            }
+        // A degenerate (identity) matrix would be a no-op commit — skip the round-trip and let
+        // the legacy path re-render the unchanged source.
+        if (matrix.contentEquals(doubleArrayOf(1.0, 0.0, 0.0, 1.0, 0.0, 0.0))) return false
+        return try {
+            val view = contentParams()
+            val c =
+                sc.commit(
+                    nodeId,
+                    matrix.toList(),
+                    view?.vw ?: devicePx(engine.layout.width),
+                    view?.vh ?: devicePx(engine.layout.height),
+                    view?.scale ?: (viewScale * dpiScale),
+                    view?.tx ?: 0.0,
+                    view?.ty ?: 0.0,
+                )
+            // The commit frame's w/h are the render size, not the document size — rebuild the
+            // layout around the engine's document dimensions.
+            engine.adoptSource(c.svg, SvgLayout(engine.layout.width, engine.layout.height, c.elements))
+            if (vpViewportMode) {
+                vpImage = c.png
+                offscreen = null
+            } else {
+                offscreen = c.png
+                vpImage = null
+            }
+            vpPreview = null
+            staticDirty = true
+            true
+        } catch (t: Throwable) {
+            sidecarActive = false
+            null
+        }
     }
 
     private fun handleDoubleClick(
@@ -1017,7 +1303,15 @@ class SvgEditorPanel(
             // break the headless pixel-consistency checks.
             paintBackground(g)
             if (gridEnabled) drawGrid(g)
-            offscreen?.let { drawScaled(g, it) }
+            // Content raster priority: frozen zoom preview > sidecar frame (viewport frames
+            // paste at (0,0), region frames go through the legacy placement) > legacy offscreen.
+            val pv = vpPreview
+            val vp = vpImage
+            when {
+                pv != null -> drawVpPreview(g, pv)
+                vp != null -> if (vpViewportMode) drawScaledAt(g, vp, 0.0, 0.0) else drawScaled(g, vp)
+                else -> offscreen?.let { drawScaled(g, it) }
+            }
             staticDirty = true // ensure the next drag re-bakes with the current base raster
         }
 
@@ -1031,6 +1325,16 @@ class SvgEditorPanel(
         g: Graphics2D,
         img: BufferedImage,
     ) {
+        drawScaledAt(g, img, offsetX, offsetY)
+    }
+
+    /** Paste a device-resolution raster at `(tx, ty)` logical px, scaled back by [dpiScale]. */
+    private fun drawScaledAt(
+        g: Graphics2D,
+        img: BufferedImage,
+        tx: Double,
+        ty: Double,
+    ) {
         // Float placement (no integer truncation) so the committed/offscreen raster is composited
         // at the exact same sub-pixel position as the drag preview — eliminating the last source
         // of a systematic "position different" shift at drag end on fractional-DPI displays.
@@ -1039,9 +1343,19 @@ class SvgEditorPanel(
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
         g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
         val at = AffineTransform()
-        at.translate(offsetX, offsetY)
+        at.translate(tx, ty)
         at.scale(dw / img.width, dh / img.height)
         g.drawImage(img, at, null)
+    }
+
+    /** Paint a frozen zoom preview with its baked-in transform (until the crisp render lands). */
+    private fun drawVpPreview(
+        g: Graphics2D,
+        preview: VpPreview,
+    ) {
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
+        g.drawImage(preview.img, preview.at, null)
     }
 
     /**

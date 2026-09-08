@@ -222,6 +222,19 @@ class SvgEditorEngine(
         reloadLayout()
         return true
     }
+
+    /**
+     * Swap in a round-trip SVG text produced by the sidecar together with its freshly parsed
+     * layout. Unlike the edit methods above this skips local re-parsing entirely — the layout
+     * arrives ready-made from the sidecar's editor tree, so both sides stay in lockstep.
+     */
+    fun adoptSource(text: String, newLayout: SvgLayout) {
+        svg = text
+        renderW = 0
+        renderH = 0
+        layout = newLayout
+        captureGeom()
+    }
 }
 
 /** Multiply two 2x3 affine matrices `[a,b,c,d,e,f]` (column-major: [[a,c,e],[b,d,f]]). */

@@ -16,6 +16,14 @@
 //!    hit-test the mouse pointer and to drive drag-to-move editing.
 //!
 //! Both functions are `extern "C"` so they are callable from any FFI bridge (JNA/JNI).
+//!
+//! The legacy JNA surface is kept for compatibility; the sidecar binary
+//! (`src/bin/sidecar.rs`) is the primary entry point since v0.4.0 and uses
+//! the `dom`/`geom`/`session` modules below.
+
+pub mod dom;
+pub mod geom;
+pub mod session;
 
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};

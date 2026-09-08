@@ -16,6 +16,81 @@ object Json {
         v
     }
 
+    /**
+     * Serialize a value tree to compact JSON. Supports the same types [parse] produces
+     * (`Map` / `List` / `String` / `Number` / `Boolean` / `null`) plus `DoubleArray` and
+     * `IntArray` for compact affine-matrix payloads. Non-finite doubles become `null`.
+     */
+    fun write(value: Any?): String {
+        val sb = StringBuilder()
+        writeValue(sb, value)
+        return sb.toString()
+    }
+
+    private fun writeValue(
+        sb: StringBuilder,
+        value: Any?,
+    ) {
+        when (value) {
+            null -> sb.append("null")
+            is String -> writeString(sb, value)
+            is Boolean -> sb.append(value)
+            is Double -> {
+                if (value.isFinite()) sb.append(value.toString()) else sb.append("null")
+            }
+            is Number -> sb.append(value.toString())
+            is Map<*, *> -> {
+                sb.append('{')
+                var first = true
+                for ((k, v) in value) {
+                    if (!first) sb.append(',')
+                    first = false
+                    writeString(sb, k.toString())
+                    sb.append(':')
+                    writeValue(sb, v)
+                }
+                sb.append('}')
+            }
+            is List<*> -> {
+                sb.append('[')
+                value.forEachIndexed { i, v ->
+                    if (i > 0) sb.append(',')
+                    writeValue(sb, v)
+                }
+                sb.append(']')
+            }
+            is DoubleArray -> writeValue(sb, value.toList())
+            is IntArray -> writeValue(sb, value.toList())
+            else -> throw IllegalArgumentException("unsupported JSON value type: ${value::class.java.name}")
+        }
+    }
+
+    private fun writeString(
+        sb: StringBuilder,
+        s: String,
+    ) {
+        sb.append('"')
+        for (c in s) {
+            when (c) {
+                '"' -> sb.append("\\\"")
+                '\\' -> sb.append("\\\\")
+                '\n' -> sb.append("\\n")
+                '\r' -> sb.append("\\r")
+                '\t' -> sb.append("\\t")
+                '\b' -> sb.append("\\b")
+                '\u000C' -> sb.append("\\f")
+                else ->
+                    if (c < ' ') {
+                        sb.append("\\u")
+                        sb.append(String.format("%04x", c.code))
+                    } else {
+                        sb.append(c)
+                    }
+            }
+        }
+        sb.append('"')
+    }
+
     private class Parser(private val s: String) {
         var i = 0
 
