@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.pan.svg"
-version = "0.6.6"
+version = "0.6.7"
 
 repositories {
     maven("https://mirrors.cloud.tencent.com/nexus/repository/maven-public/")
