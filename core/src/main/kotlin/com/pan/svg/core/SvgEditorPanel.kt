@@ -142,6 +142,21 @@ class SvgEditorPanel(
     /** True when [vpImage] is a viewport frame (pasted at 0,0); false = full-canvas region frame. */
     private var vpViewportMode = false
 
+    /**
+     * Downscale factor the current [vpImage] was produced with during a heavy-document zoom
+     * burst (1.0 normally). The raster is up-scaled by `1/down` on display, so the picture stays
+     * correct while each burst frame renders in a fraction of the device-pixel budget.
+     */
+    private var contentDown = 1.0
+
+    /**
+     * True while a Ctrl+wheel zoom burst is rendering a heavy document. During the burst,
+     * content frames use [contentDown]'s reduced resolution and hover/drag-layer pre-heat is
+     * skipped (both cost work that only matters once the zoom stops). Cleared by [crispTimer]
+     * once the wheel settles, which then re-renders at full resolution.
+     */
+    private var zoomBurst = false
+
     /** Frozen zoom snapshot shown during wheel/resize bursts until the crisp frame lands. */
     private var vpPreview: VpPreview? = null
 
@@ -203,13 +218,16 @@ class SvgEditorPanel(
      */
     var onEdit: (() -> Unit)? = null
 
-    /** View parameters for one sidecar content frame (Rust maps px = svg*scale + tx). */
+    /** View parameters for one sidecar content frame (Rust maps px = svg*scale + tx).
+     *  `down` is the burst downscale used to produce this frame (1.0 at rest; display
+     *  compensates by up-scaling by `1/down`). */
     private data class VpTag(
         val vw: Int,
         val vh: Int,
         val scale: Double,
         val tx: Double,
         val ty: Double,
+        val down: Double = 1.0,
     )
 
     /** Frozen zoom snapshot: the last content frame + the transform that displays it at the new zoom. */
@@ -247,8 +265,14 @@ class SvgEditorPanel(
     private val crispTimer: Timer? =
         scheduler?.let {
             Timer(CRISP_DELAY_MS) {
+                // The wheel-zoom burst is over: drop the reduced-resolution content state and
+                // re-render one crisp full-resolution frame for the settled view.
+                zoomBurst = false
                 renderAtDeviceSize()
                 canvas.repaint()
+                // Re-warm hover drag layers that were skipped while the burst was running.
+                val pid = pendingHoverId
+                if (selectedId == null && pid != null && pid != layerId) preheatTimer?.restart()
             }.apply { isRepeats = false }
         }
 
@@ -257,13 +281,18 @@ class SvgEditorPanel(
         scheduler?.let {
             Timer(PREHEAT_DELAY_MS) {
                 val id = pendingHoverId
-                if (selectedId == null && id != null && id != layerId) requestLayers(id)
+                if (!zoomBurst && selectedId == null && id != null && id != layerId) requestLayers(id)
             }.apply { isRepeats = false }
         }
 
     companion object {
         private const val CRISP_DELAY_MS = 160
         private const val PREHEAT_DELAY_MS = 120
+        /** Burst content-frame downscale for heavy documents (0.5 ⇒ 25% of the device pixels). */
+        private const val BURST_DOWNSCALE = 0.5
+        /** Documents at/above either threshold are treated as heavy for zoom-burst rendering. */
+        private const val HEAVY_SOURCE_BYTES = 96 * 1024
+        private const val HEAVY_ELEMENTS = 500
 
         // --- Transparency chessboard (mirrors IDEA ImageComponent defaults) ---
         private const val CHESS_CELL = 8 // px per half-cell on screen
@@ -772,7 +801,10 @@ class SvgEditorPanel(
         // "jump"). The fresh pair lands via requestLayers' staleness-guarded callback.
         if (layerId != null && !layersCurrent()) clearLayers()
         requestContent()
-        selectedId?.let { requestLayers(it) }
+        // Pre-heating the selection's drag layers is wasted raster churn while a zoom burst is
+        // re-submitting the content frame on every notch — the zoomed frame would invalidate
+        // them instantly. Defer until the wheel settles (crispTimer re-requests them).
+        if (!zoomBurst) selectedId?.let { requestLayers(it) }
         staticDirty = true
     }
 
@@ -829,6 +861,7 @@ class SvgEditorPanel(
                     pickImage = result?.second
                     vpImage = null
                     vpPreview = null
+                    contentDown = 1.0 // legacy frames are always produced at full resolution
                     staticDirty = true
                     canvas.repaint()
                 } else {
@@ -878,9 +911,19 @@ class SvgEditorPanel(
     private fun requestContentViewport(sc: SidecarClient) {
         val wanted = contentParams() ?: return
         val isViewport = vpViewportMode
+        val down = wanted.down
+        // A burst frame is rendered at `down`× the device pixel budget: the pixel grid AND the
+        // view transform (scale/tx/ty) shrink together so exactly the same SVG region is
+        // covered. The draw path then up-scales the raster by 1/down, so the picture stays
+        // geometrically correct while each notch costs a fraction of a full-res render.
+        val rw = kotlin.math.max(1, kotlin.math.round(wanted.vw * down).toInt())
+        val rh = kotlin.math.max(1, kotlin.math.round(wanted.vh * down).toInt())
+        val rscale = wanted.scale * down
+        val rtx = wanted.tx * down
+        val rty = wanted.ty * down
         val task = {
             try {
-                sc.renderViewport(wanted.vw, wanted.vh, wanted.scale, wanted.tx, wanted.ty)
+                sc.renderViewport(rw, rh, rscale, rtx, rty)
             } catch (t: Throwable) {
                 lastRenderError = t
                 null
@@ -891,6 +934,7 @@ class SvgEditorPanel(
                 vpImage = result
                 offscreen = null
                 vpPreview = null
+                contentDown = wanted.down
                 staticDirty = true
                 canvas.repaint()
             } else if (result == null) {
@@ -904,12 +948,15 @@ class SvgEditorPanel(
         scheduler.submit(RenderScheduler.Slot.CONTENT, wanted, task) { result, _ -> apply(result) }
     }
 
-    /** Current view parameters for a sidecar frame; also refreshes [vpViewportMode]. */
+    /** Current view parameters for a sidecar frame; also refreshes [vpViewportMode].
+     *  The fields carry the FULL-resolution view (used for staleness checks, hit testing and
+     *  edit round-trips); the render path applies [VpTag.down] itself. */
     private fun contentParams(): VpTag? {
         val w = engine.layout.width
         val h = engine.layout.height
         if (w <= 0 || h <= 0) return null
         val dpr = dpiScale
+        val down = if (zoomBurst) BURST_DOWNSCALE else 1.0
         return if (w * viewScale <= viewW() && h * viewScale <= viewH()) {
             vpViewportMode = true
             VpTag(
@@ -918,6 +965,7 @@ class SvgEditorPanel(
                 scale = viewScale * dpr,
                 tx = offsetX * dpr,
                 ty = offsetY * dpr,
+                down = down,
             )
         } else {
             vpViewportMode = false
@@ -927,6 +975,7 @@ class SvgEditorPanel(
                 scale = viewScale * dpr,
                 tx = 0.0,
                 ty = 0.0,
+                down = down,
             )
         }
     }
@@ -1221,11 +1270,23 @@ class SvgEditorPanel(
         offsetY = if (dh <= ch) (ch - dh) / 2.0 else offsetY.coerceIn(ch - dh, 0.0)
     }
 
-    /** Zoom by `factor`, keeping the SVG point under `(ax, ay)` (panel px) fixed when given. */
+    /**
+     * Whether the loaded document is expensive enough to rasterize to earn the burst
+     * optimisations (reduced burst resolution + skipped pre-heat churn). Cheap documents render
+     * fast enough at full resolution that downscaling would only add blur.
+     */
+    private fun isHeavySource(): Boolean =
+        engine.layout.elements.size >= HEAVY_ELEMENTS || engine.svgSource.length >= HEAVY_SOURCE_BYTES
+
+    /** Zoom by `factor`, keeping the SVG point under `(ax, ay)` (panel px) fixed when given.
+     *  `burst` = true when the caller expects repeated notches (Ctrl+wheel): a heavy document
+     *  then renders each notch at reduced resolution and defers the crisp frame until the burst
+     *  settles. */
     private fun zoomBy(
         factor: Double,
         ax: Double? = null,
         ay: Double? = null,
+        burst: Boolean = false,
     ) {
         val w = engine.layout.width
         val h = engine.layout.height
@@ -1251,10 +1312,23 @@ class SvgEditorPanel(
         // The canvas is pinned to the fixed viewport (no scrollbars), so its pref size never
         // needs to grow with zoom — only the visible framing changes.
         canvas.revalidate()
+        // Heavy documents on a wheel burst render each notch at reduced resolution and get the
+        // crisp frame when the wheel settles (crispTimer clears the burst flag). Any other zoom
+        // ends an ongoing burst immediately so a discrete action is answered with a crisp frame.
+        if (scheduler != null) {
+            val wasBurst = zoomBurst
+            zoomBurst = burst && isHeavySource()
+            when {
+                zoomBurst -> crispTimer?.restart()
+                wasBurst -> crispTimer?.stop()
+            }
+        }
         // Instant feedback while zooming: freeze the current sidecar frame and paste it under
         // the new view transform until the crisp re-render lands. A viewport frame moves with
         // the old pan, so it needs the −k·oldOffset correction; a region frame is pasted at the
-        // plain new pan. Both keep the SVG point under the cursor visually fixed.
+        // plain new pan. Both keep the SVG point under the cursor visually fixed. The source may
+        // be a reduced-resolution burst frame, so its transform is up-scaled by 1/contentDown to
+        // compensate (the contentDown invariant: 1.0 whenever the source is [offscreen]).
         if (scheduler != null && oldView > 0.0 && viewScale > 0.0 && oldView != viewScale) {
             val src = vpImage ?: offscreen
             if (src != null) {
@@ -1265,7 +1339,7 @@ class SvgEditorPanel(
                 } else {
                     at.translate(offsetX, offsetY)
                 }
-                at.scale(k / dpiScale, k / dpiScale)
+                at.scale(k / dpiScale / contentDown, k / dpiScale / contentDown)
                 vpPreview = VpPreview(src, at)
             }
         }
@@ -1344,7 +1418,7 @@ class SvgEditorPanel(
             if (e.isControlDown || e.isMetaDown) {
                 e.consume()
                 val f = if (e.wheelRotation < 0) 1.1 else 1.0 / 1.1
-                zoomBy(f, e.x.toDouble(), e.y.toDouble())
+                zoomBy(f, e.x.toDouble(), e.y.toDouble(), burst = true)
             } else {
                 scrollViewportByWheel(e)
             }
@@ -1495,8 +1569,9 @@ class SvgEditorPanel(
             pendingHoverId = newHover
             // Pre-heat the drag layers shortly after hover so the first drag is already warm.
             // Only the MOVE tool ever drags; the MARQUEE tool must not spend raster budget (or
-            // risk the composite flash) on mere hover.
-            if (scheduler != null && tool == Tool.MOVE && newHover != null && selectedId == null && newHover != layerId) {
+            // risk the composite flash) on mere hover. A zoom burst skips the pre-heat too — the
+            // frame is re-rendering every notch and the layers would be invalidated instantly.
+            if (scheduler != null && !zoomBurst && tool == Tool.MOVE && newHover != null && selectedId == null && newHover != layerId) {
                 preheatTimer?.restart()
             }
         }
@@ -1885,6 +1960,7 @@ class SvgEditorPanel(
             // The commit frame's w/h are the render size, not the document size — rebuild the
             // layout around the engine's document dimensions.
             engine.adoptSource(c.svg, SvgLayout(engine.layout.width, engine.layout.height, c.elements))
+            contentDown = 1.0 // commit frames are always full resolution
             if (vpViewportMode) {
                 vpImage = c.png
                 offscreen = null
@@ -2050,11 +2126,16 @@ class SvgEditorPanel(
             if (gridEnabled) drawGrid(g)
             // Content raster priority: frozen zoom preview > sidecar frame (viewport frames
             // paste at (0,0), region frames go through the legacy placement) > legacy offscreen.
+            // A sidecar frame may be a reduced-resolution burst frame: its natural draw size is
+            // `contentDown`× the full size, so it is up-scaled by 1/contentDown to compensate.
             val pv = vpPreview
             val vp = vpImage
             when {
                 pv != null -> drawVpPreview(g, pv)
-                vp != null -> if (vpViewportMode) drawScaledAt(g, vp, 0.0, 0.0) else drawScaled(g, vp)
+                vp != null -> {
+                    val up = 1.0 / contentDown
+                    if (vpViewportMode) drawScaledAt(g, vp, 0.0, 0.0, up) else drawScaled(g, vp, up)
+                }
                 else -> offscreen?.let { drawScaled(g, it) }
             }
             staticDirty = true // ensure the next drag re-bakes with the current base raster
@@ -2068,22 +2149,26 @@ class SvgEditorPanel(
     private fun drawScaled(
         g: Graphics2D,
         img: BufferedImage,
+        up: Double = 1.0,
     ) {
-        drawScaledAt(g, img, offsetX, offsetY)
+        drawScaledAt(g, img, offsetX, offsetY, up)
     }
 
-    /** Paste a device-resolution raster at `(tx, ty)` logical px, scaled back by [dpiScale]. */
+    /** Paste a device-resolution raster at `(tx, ty)` logical px, scaled back by [dpiScale].
+     *  `up` additionally up-scales the paste (used to compensate reduced-resolution burst
+     *  frames: pass `1 / down` so they fill the same screen rectangle as a full-res frame). */
     private fun drawScaledAt(
         g: Graphics2D,
         img: BufferedImage,
         tx: Double,
         ty: Double,
+        up: Double = 1.0,
     ) {
         // Float placement (no integer truncation) so the committed/offscreen raster is composited
         // at the exact same sub-pixel position as the drag preview — eliminating the last source
         // of a systematic "position different" shift at drag end on fractional-DPI displays.
-        val dw = img.width / dpiScale
-        val dh = img.height / dpiScale
+        val dw = img.width / dpiScale * up
+        val dh = img.height / dpiScale * up
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
         g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
         val at = AffineTransform()

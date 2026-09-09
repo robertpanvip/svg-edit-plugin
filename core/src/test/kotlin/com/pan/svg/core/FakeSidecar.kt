@@ -3,7 +3,9 @@ package com.pan.svg.core
 import java.util.Base64
 
 open class FakeSidecar : SidecarClient(listOf("fake-sidecar")) {
-    val calls = mutableListOf<Pair<String, Map<String, Any?>>>()
+    // Async panels record calls from the render-worker thread while the test reads them from the
+    // main thread, so the log must be thread-safe.
+    val calls = java.util.Collections.synchronizedList(mutableListOf<Pair<String, Map<String, Any?>>>())
 
     var failOn: String? = null
 
@@ -65,10 +67,13 @@ open class FakeSidecar : SidecarClient(listOf("fake-sidecar")) {
         }
     }
 
-    fun count(method: String): Int = calls.count { it.first == method }
+    fun count(method: String): Int = synchronized(calls) { calls.count { it.first == method } }
 
     fun paramsOf(
         method: String,
         n: Int = 0,
-    ): Map<String, Any?> = calls.filter { it.first == method }.map { it.second }[n]
+    ): Map<String, Any?> {
+        val matches = synchronized(calls) { calls.filter { it.first == method }.map { it.second } }
+        return matches[n]
+    }
 }
