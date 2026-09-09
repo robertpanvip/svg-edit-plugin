@@ -1454,8 +1454,14 @@ class SvgEditorPanel(
         // decision. After a committed edit the layout moved, but interaction.selected would
         // otherwise still hold the pre-edit snapshot: pressing inside the overlap of old & new
         // boxes re-uses the stale origin and the second drag starts with a visible jump.
+        // Sidecar leaves carry a blank source id (selection keys are nodeId strings), so keep
+        // the controller's element id when re-binding — a blank id would fail selectOnly and
+        // the press would silently deselect instead of grabbing the element.
         interaction.selected?.let { sel ->
-            engine.layout.byId(sel.id)?.let { fresh -> interaction.selected = fresh }
+            val fresh = engine.layout.byNodeId(sel.nodeId) ?: engine.layout.byId(sel.id)
+            fresh?.let { f ->
+                interaction.selected = if (f.id.isBlank()) f.copy(id = sel.id) else f
+            }
         }
         // The rotate handle (a circle above the selection box) takes priority.
         selectedId?.let { sid ->

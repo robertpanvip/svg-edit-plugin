@@ -56,6 +56,49 @@ class SidecarRingHitTest {
         c.dispatchEvent(MouseEvent(c, MouseEvent.MOUSE_RELEASED, 0, 0, pt.x, pt.y, 1, false, MouseEvent.BUTTON1))
     }
 
+    private fun pressAt(
+        p: SvgEditorPanel,
+        docX: Double,
+        docY: Double,
+        count: Int = 1,
+    ) {
+        val c = p.debugCanvas()
+        val pt = px(p, docX, docY)
+        c.dispatchEvent(MouseEvent(c, MouseEvent.MOUSE_PRESSED, 0, MouseEvent.BUTTON1_DOWN_MASK, pt.x, pt.y, count, false, MouseEvent.BUTTON1))
+    }
+
+    private fun releaseAt(
+        p: SvgEditorPanel,
+        docX: Double,
+        docY: Double,
+        count: Int = 1,
+    ) {
+        val c = p.debugCanvas()
+        val pt = px(p, docX, docY)
+        c.dispatchEvent(MouseEvent(c, MouseEvent.MOUSE_RELEASED, 0, 0, pt.x, pt.y, count, false, MouseEvent.BUTTON1))
+    }
+
+    private fun clickedAt(
+        p: SvgEditorPanel,
+        docX: Double,
+        docY: Double,
+        count: Int,
+    ) {
+        val c = p.debugCanvas()
+        val pt = px(p, docX, docY)
+        c.dispatchEvent(MouseEvent(c, MouseEvent.MOUSE_CLICKED, 0, 0, pt.x, pt.y, count, false, MouseEvent.BUTTON1))
+    }
+
+    private fun dragAt(
+        p: SvgEditorPanel,
+        docX: Double,
+        docY: Double,
+    ) {
+        val c = p.debugCanvas()
+        val pt = px(p, docX, docY)
+        c.dispatchEvent(MouseEvent(c, MouseEvent.MOUSE_DRAGGED, 0, MouseEvent.BUTTON1_DOWN_MASK, pt.x, pt.y, 0, false, MouseEvent.BUTTON1))
+    }
+
     @Test
     fun `sidecar single click on the ring band selects the ring leaf`() {
         SidecarClient(listOf(sidecar.toString())).use { sc ->
@@ -82,6 +125,37 @@ class SidecarRingHitTest {
                     .firstOrNull { it.id.ifBlank { it.nodeId.toString() } == gearSel }
                     ?.nodeId
             assertTrue(gearNode == 2L, "gear click must pick the gear leaf (node 2), got $gearNode")
+            p.dispose()
+        }
+    }
+
+    @Test
+    fun `sidecar double-click and drag keep the ring selected throughout`() {
+        SidecarClient(listOf(sidecar.toString())).use { sc ->
+            val p = SvgEditorPanel(bridge, asyncRendering = false, sidecar = sc)
+            p.loadSvg(RingIconSvg.TEXT)
+            p.debugSetViewportSize(800, 800)
+            p.fitView()
+            val ringKey = "3"
+            // Real double-click sequence on the ring band. The SECOND press must not drop the
+            // selection: the controller's element id was re-bound to a layout copy whose blank
+            // source id failed selectOnly, so the outline jumped away mid-double-click.
+            pressAt(p, 590.0, 522.0); releaseAt(p, 590.0, 522.0)
+            clickedAt(p, 590.0, 522.0, 1)
+            pressAt(p, 590.0, 522.0, 2)
+            assertTrue(p.selectedElementId == ringKey, "2nd press of the double-click must keep the ring, got ${p.selectedElementId}")
+            releaseAt(p, 590.0, 522.0, 2)
+            clickedAt(p, 590.0, 522.0, 2)
+            assertTrue(p.selectedElementId == ringKey, "double-click must end with the ring selected, got ${p.selectedElementId}")
+            // Drag the ring by (60,30) — the same element must stay selected every frame.
+            val before = p.svgSource
+            pressAt(p, 590.0, 522.0)
+            dragAt(p, 620.0, 537.0)
+            dragAt(p, 650.0, 552.0)
+            assertTrue(p.selectedElementId == ringKey, "mid-drag must still be the ring, got ${p.selectedElementId}")
+            releaseAt(p, 650.0, 552.0)
+            assertTrue(p.selectedElementId == ringKey, "after release the ring must stay selected, got ${p.selectedElementId}")
+            assertTrue(p.svgSource != before, "dragging the ring band must commit a move")
             p.dispose()
         }
     }
