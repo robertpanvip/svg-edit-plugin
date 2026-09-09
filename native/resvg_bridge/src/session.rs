@@ -145,39 +145,47 @@ impl Session {
         y: f64,
         tol: f64,
     ) -> Option<usize> {
-        let resolved = override_node.or_else(|| {
-            let id = node_id_of(node)?;
-            self.id_to_node.get(id).copied()
-        })?;
         match node {
+            // Groups are never hit targets. usvg synthesizes ANONYMOUS wrapper groups around
+            // many constructs (transformed children, clipped/overflow content, text runs), and
+            // those carry no id, so they must not block the descent into their children.
             Node::Group(g) => self.hit_group(g, override_node, x, y, tol),
-            Node::Path(p) => {
-                if !p.is_visible() {
-                    return None;
+            _ => {
+                let resolved = override_node.or_else(|| {
+                    let id = node_id_of(node)?;
+                    self.id_to_node.get(id).copied()
+                })?;
+                match node {
+                    Node::Path(p) => {
+                        if !p.is_visible() {
+                            return None;
+                        }
+                        let t = mat_of(p.abs_transform());
+                        let inv = t.invert()?;
+                        let (lx, ly) = inv.apply(x, y);
+                        let ltol = tol / t.abs_scale();
+                        if self.path_hit(p, lx, ly, ltol) {
+                            Some(resolved)
+                        } else {
+                            None
+                        }
+                    }
+                    Node::Image(img) => {
+                        let b = img.abs_bounding_box();
+                        let (bx, by, bw, bh) =
+                            (b.x() as f64, b.y() as f64, b.width() as f64, b.height() as f64);
+                        if x >= bx - tol && x <= bx + bw + tol && y >= by - tol && y <= by + bh + tol {
+                            Some(resolved)
+                        } else {
+                            None
+                        }
+                    }
+                    Node::Text(txt) => {
+                        // Glyph paths carry no ids; keep the text element's identity.
+                        self.hit_group(txt.flattened(), Some(resolved), x, y, tol)
+                    }
+                    Node::Group(_) => unreachable!(),
                 }
-                let t = mat_of(p.abs_transform());
-                let inv = t.invert()?;
-                let (lx, ly) = inv.apply(x, y);
-                let ltol = tol / t.abs_scale();
-                if self.path_hit(p, lx, ly, ltol) {
-                    Some(resolved)
-                } else {
-                    None
-                }
-            }
-            Node::Image(img) => {
-                let b = img.abs_bounding_box();
-                let (bx, by, bw, bh) =
-                    (b.x() as f64, b.y() as f64, b.width() as f64, b.height() as f64);
-                if x >= bx - tol && x <= bx + bw + tol && y >= by - tol && y <= by + bh + tol {
-                    Some(resolved)
-                } else {
-                    None
-                }
-            }
-            Node::Text(txt) => {
-                // Glyph paths carry no ids; keep the text element's identity.
-                self.hit_group(txt.flattened(), Some(resolved), x, y, tol)
             }
         }
     }
@@ -630,5 +638,33 @@ mod tests {
                 .decode(s)
                 .unwrap()
         }
+    }
+
+    // Mirrors the reported icon: a lone transformed <path> with the root carrying icon-style
+    // attributes (no width/height, class + style + overflow). usvg wraps such leaves in
+    // anonymous wrapper groups that carry no id — hit testing must descend through them.
+    const WRAPPED_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="currentColor" class="icon" overflow="hidden" style="width:1em;height:1em;vertical-align:middle" viewBox="0 0 1024 1024">
+      <path fill="#666" d="M512 341.333 C416 341.333 341.333 416 341.333 512 S416 682.667 512 682.667 682.667 608 682.667 512 S608 341.333 512 341.333 Z M512 414 C578.1 414 632 467.9 632 512 S578.1 610 512 610 392 556.1 392 512 445.9 414 512 414 Z" transform="translate(-62.060606 9.873278)"/>
+    </svg>"##;
+
+    #[test]
+    fn hit_test_descends_through_anonymous_wrapper_groups() {
+        let s = Session::new(WRAPPED_ICON).unwrap();
+        // The fixture must actually reproduce the failure mode: usvg wraps the transformed leaf
+        // in an id-less group. Without this, the test would not guard the regression.
+        assert!(
+            s.tree.root().children().iter().any(|c| matches!(c, Node::Group(g) if g.id().is_empty())),
+            "fixture must produce an anonymous wrapper group",
+        );
+        let layout = s.layout_json();
+        let node = layout["elements"][0]["nodeId"].as_u64().unwrap() as usize;
+        // Ring centre is at (450, 522) after the translate; the band spans radii ~98..171.
+        // Regression: the leaf sat under an id-less usvg wrapper group, so every hit returned
+        // None and the ring (and any transformed icon path) could never be selected.
+        assert_eq!(s.hit_test(590.0, 522.0, 0.5), Some(node)); // right band
+        assert_eq!(s.hit_test(310.0, 522.0, 0.5), Some(node)); // left band
+        assert_eq!(s.hit_test(450.0, 380.0, 0.5), Some(node)); // top band
+        assert_eq!(s.hit_test(450.0, 522.0, 0.5), None); // hollow centre
+        assert_eq!(s.hit_test(800.0, 800.0, 0.5), None); // outside
     }
 }
