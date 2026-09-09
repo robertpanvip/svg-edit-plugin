@@ -370,13 +370,51 @@ class SvgEditorPanel(
     /** Delete all selected elements from the document. */
     fun deleteSelected() {
         if (selectedIds.isEmpty()) return
+        val sc = sidecar
+        val viaSidecar = sc != null && sidecarActive
         var changed = false
-        for (id in selectedIds.toList()) changed = engine.deleteElement(id) || changed
+        // Sidecar leaves carry a blank source id, so they can only be deleted through the native
+        // document by node id (the legacy source-rewriting engine edit is a no-op for them).
+        for (id in selectedIds.toList()) {
+            val el = engine.layout.byId(id) ?: continue
+            if (viaSidecar && el.nodeId != 0L) {
+                if (removeSidecar(el.nodeId)) changed = true
+            } else {
+                changed = engine.deleteElement(id) || changed
+            }
+        }
         if (changed) {
             clearSelection()
             onEdit?.invoke()
         }
         refreshStructural(null)
+    }
+
+    /**
+     * Delete the element with `nodeId` through the sidecar (Rust removes the subtree and returns
+     * the round-trip SVG). Adopts the result into the engine on success; on failure the sidecar
+     * is retired and the delete is dropped (mirrors [commitSidecar]'s safety behaviour).
+     */
+    private fun removeSidecar(nodeId: Long): Boolean {
+        val sc = sidecar
+        if (sc == null || !sidecarActive) return false
+        return try {
+            val view = contentParams()
+            val c =
+                sc.remove(
+                    nodeId,
+                    view?.vw ?: devicePx(engine.layout.width),
+                    view?.vh ?: devicePx(engine.layout.height),
+                    view?.scale ?: (viewScale * dpiScale),
+                    view?.tx ?: 0.0,
+                    view?.ty ?: 0.0,
+                )
+            engine.adoptSource(c.svg, SvgLayout(engine.layout.width, engine.layout.height, c.elements))
+            true
+        } catch (t: Throwable) {
+            sidecarActive = false
+            false
+        }
     }
 
     /** Duplicate (paste) the given element ids at a small offset; new copies become the selection. */
@@ -2220,68 +2258,78 @@ class SvgEditorPanel(
     }
 
     /**
-     * Selection overlay for the currently selected element: a rotated accent outline plus 8 round
-     * control handles. Drawn only after a click selects an element (hover never highlights).
+     * Selection overlay. Every selected element gets an accent outline, so a multi-selection
+     * (marquee box-select) visibly marks ALL members instead of hiding all but the primary. The
+     * primary member additionally carries the 8 control handles and the rotate lever.
+     *
+     * Only the primary's box tracks the live (snapped) preview during a manipulation; the other
+     * members sit on their resting geometry until the group edit commits.
      */
     private fun drawSelection(g: Graphics2D) {
-        selectedId?.let { id ->
-            engine.layout.byId(id)?.let { el ->
-                // While dragging, the box tracks the (snapped) preview box; otherwise it sits
-                // on the element's resting geometry. previewAngle rotates the whole overlay.
-                val box = interaction.previewBox
-                    ?: InteractionController.Box(el.x, el.y, el.width, el.height)
-                val rad = Math.toRadians(interaction.previewAngle)
-                val bcx = offsetX + (box.x + box.w / 2) * viewScale
-                val bcy = offsetY + (box.y + box.h / 2) * viewScale
-                val rot: (Double, Double) -> Pair<Double, Double> = { px, py -> rotatePt(px, py, bcx, bcy, rad) }
-
-                // Selection outline as a floating-point rotated path (crisper than int lines).
-                val c0 = rot(offsetX + box.x * viewScale, offsetY + box.y * viewScale)
-                val c1 = rot(offsetX + (box.x + box.w) * viewScale, offsetY + box.y * viewScale)
-                val c2 = rot(offsetX + (box.x + box.w) * viewScale, offsetY + (box.y + box.h) * viewScale)
-                val c3 = rot(offsetX + box.x * viewScale, offsetY + (box.y + box.h) * viewScale)
-                val outline = Path2D.Double()
-                outline.moveTo(c0.first, c0.second)
-                outline.lineTo(c1.first, c1.second)
-                outline.lineTo(c2.first, c2.second)
-                outline.lineTo(c3.first, c3.second)
-                outline.closePath()
-                g.color = EditorTheme.ACCENT
-                g.stroke = BasicStroke(EditorTheme.STROKE)
-                g.draw(outline)
-
-                // 8 round control points (white fill, accent outline).
-                val r = EditorTheme.HANDLE / 2.0
-                for (h in InteractionController.Handle.entries) {
-                    val (hx, hy) = interaction.handlePoint(box, h)
-                    val (px, py) = rot(offsetX + hx * viewScale, offsetY + hy * viewScale)
-                    val dot =
-                        Ellipse2D.Double(px - r, py - r, EditorTheme.HANDLE.toDouble(), EditorTheme.HANDLE.toDouble())
-                    g.color = EditorTheme.HANDLE_FILL
-                    g.fill(dot)
-                    g.color = EditorTheme.ACCENT
-                    g.draw(dot)
+        if (selectedIds.isEmpty()) return
+        val primaryId = selectedId
+        for (id in selectedIds.toList()) {
+            val el = engine.layout.byId(id) ?: continue
+            val isPrimary = id == primaryId
+            val box =
+                if (isPrimary) {
+                    interaction.previewBox
+                        ?: InteractionController.Box(el.x, el.y, el.width, el.height)
+                } else {
+                    InteractionController.Box(el.x, el.y, el.width, el.height)
                 }
+            val rad = if (isPrimary) Math.toRadians(interaction.previewAngle) else 0.0
+            val bcx = offsetX + (box.x + box.w / 2) * viewScale
+            val bcy = offsetY + (box.y + box.h / 2) * viewScale
+            val rot: (Double, Double) -> Pair<Double, Double> = { px, py -> rotatePt(px, py, bcx, bcy, rad) }
 
-                // Rotate handle: a lever from the top-centre of the box up to a circular grip.
-                val topCx = offsetX + (box.x + box.w / 2) * viewScale
-                val topCy = offsetY + box.y * viewScale
-                val (lx, ly) = rot(topCx, topCy)
-                val (hx2, hy2) = rot(topCx, topCy - EditorTheme.ROTATE_OFFSET)
-                g.color = EditorTheme.ACCENT
-                g.draw(Line2D.Double(lx, ly, hx2, hy2))
-                val grip =
-                    Ellipse2D.Double(
-                        hx2 - EditorTheme.ROTATE_R,
-                        hy2 - EditorTheme.ROTATE_R,
-                        EditorTheme.ROTATE_R * 2.0,
-                        EditorTheme.ROTATE_R * 2.0,
-                    )
+            // Selection outline as a floating-point rotated path (crisper than int lines).
+            val c0 = rot(offsetX + box.x * viewScale, offsetY + box.y * viewScale)
+            val c1 = rot(offsetX + (box.x + box.w) * viewScale, offsetY + box.y * viewScale)
+            val c2 = rot(offsetX + (box.x + box.w) * viewScale, offsetY + (box.y + box.h) * viewScale)
+            val c3 = rot(offsetX + box.x * viewScale, offsetY + (box.y + box.h) * viewScale)
+            val outline = Path2D.Double()
+            outline.moveTo(c0.first, c0.second)
+            outline.lineTo(c1.first, c1.second)
+            outline.lineTo(c2.first, c2.second)
+            outline.lineTo(c3.first, c3.second)
+            outline.closePath()
+            g.color = EditorTheme.ACCENT
+            g.stroke = BasicStroke(EditorTheme.STROKE)
+            g.draw(outline)
+            if (!isPrimary) continue
+
+            // 8 round control points (white fill, accent outline) on the primary only.
+            val r = EditorTheme.HANDLE / 2.0
+            for (h in InteractionController.Handle.entries) {
+                val (hx, hy) = interaction.handlePoint(box, h)
+                val (px, py) = rot(offsetX + hx * viewScale, offsetY + hy * viewScale)
+                val dot =
+                    Ellipse2D.Double(px - r, py - r, EditorTheme.HANDLE.toDouble(), EditorTheme.HANDLE.toDouble())
                 g.color = EditorTheme.HANDLE_FILL
-                g.fill(grip)
+                g.fill(dot)
                 g.color = EditorTheme.ACCENT
-                g.draw(grip)
+                g.draw(dot)
             }
+
+            // Rotate handle: a lever from the top-centre of the box up to a circular grip.
+            val topCx = offsetX + (box.x + box.w / 2) * viewScale
+            val topCy = offsetY + box.y * viewScale
+            val (lx, ly) = rot(topCx, topCy)
+            val (hx2, hy2) = rot(topCx, topCy - EditorTheme.ROTATE_OFFSET)
+            g.color = EditorTheme.ACCENT
+            g.draw(Line2D.Double(lx, ly, hx2, hy2))
+            val grip =
+                Ellipse2D.Double(
+                    hx2 - EditorTheme.ROTATE_R,
+                    hy2 - EditorTheme.ROTATE_R,
+                    EditorTheme.ROTATE_R * 2.0,
+                    EditorTheme.ROTATE_R * 2.0,
+                )
+            g.color = EditorTheme.HANDLE_FILL
+            g.fill(grip)
+            g.color = EditorTheme.ACCENT
+            g.draw(grip)
         }
     }
 

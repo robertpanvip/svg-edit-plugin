@@ -182,6 +182,36 @@ open class SidecarClient(private val command: List<String>) : AutoCloseable {
         )
     }
 
+    fun remove(
+        nodeId: Long,
+        vw: Int,
+        vh: Int,
+        scale: Double,
+        tx: Double,
+        ty: Double,
+    ): SidecarCommit {
+        val res =
+            reply(
+                request(
+                    "remove",
+                    linkedMapOf(
+                        "nodeId" to nodeId, "vw" to vw, "vh" to vh,
+                        "scale" to scale, "tx" to tx, "ty" to ty,
+                    ),
+                ),
+                "remove",
+            )
+        val svg = res["svg"] as? String ?: throw SidecarException("remove reply missing svg")
+        val png = res["png"] as? String ?: throw SidecarException("remove reply missing png")
+        return SidecarCommit(
+            svg = svg,
+            png = decodePng(png),
+            elements = elementsOf(res["elements"]),
+            width = (res["w"] as? Number)?.toInt() ?: 0,
+            height = (res["h"] as? Number)?.toInt() ?: 0,
+        )
+    }
+
     fun renderViewport(vw: Int, vh: Int, scale: Double, tx: Double, ty: Double): BufferedImage {
         val res =
             reply(

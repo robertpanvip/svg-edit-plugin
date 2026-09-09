@@ -102,6 +102,9 @@ pub struct Document {
     /// Flat arena in document order; index 0 is the `#document` root.
     /// Children always have higher indices than their parent.
     pub nodes: Vec<NodeKind>,
+    /// Tombstones: subtrees removed by an edit (their parent's children lists no longer
+    /// reference them, but the arena slots stay so every index remains valid).
+    pub removed: Vec<bool>,
 }
 
 impl Document {
@@ -197,9 +200,11 @@ impl Document {
             }
         }
 
+        let count = nodes.len();
         Document {
             source: source.to_string(),
             nodes,
+            removed: vec![false; count],
         }
     }
 
@@ -225,14 +230,39 @@ impl Document {
     }
 
     pub fn find_by_node_id(&self, node_id: usize) -> Option<usize> {
-        self.nodes.iter().position(
-            |n| matches!(n, NodeKind::Element(e) if e.node_id == node_id),
-        )
+        self.nodes.iter().enumerate().position(|(i, n)| {
+            matches!(n, NodeKind::Element(e) if e.node_id == node_id && !self.removed[i])
+        })
     }
 
-    /// All element arena indices in document order (z-order for SVG).
+    /// All element arena indices in document order (z-order for SVG), excluding removed ones.
     pub fn element_indices(&self) -> impl Iterator<Item = usize> + '_ {
-        (1..self.nodes.len()).filter(|&i| matches!(self.nodes[i], NodeKind::Element(_)))
+        (1..self.nodes.len())
+            .filter(|&i| matches!(self.nodes[i], NodeKind::Element(_)) && !self.removed[i])
+    }
+
+    /// Remove the subtree rooted at `idx` (its arena slot is tombstoned; the node is dropped
+    /// from its parent's children so it is neither serialized nor listed afterwards).
+    pub fn remove_node(&mut self, idx: usize) {
+        if idx == 0 || self.removed[idx] {
+            return;
+        }
+        fn mark(nodes: &Vec<NodeKind>, removed: &mut [bool], i: usize) {
+            removed[i] = true;
+            if let NodeKind::Element(el) = &nodes[i] {
+                for &c in &el.children {
+                    mark(nodes, removed, c);
+                }
+            }
+        }
+        mark(&self.nodes, &mut self.removed, idx);
+        let parent = self.element(idx).map(|e| e.parent).unwrap_or(0);
+        if let NodeKind::Element(parent_el) = &mut self.nodes[parent] {
+            parent_el.children.retain(|&c| c != idx);
+            // The parent's content changed, so it (and its ancestors) must be re-serialized
+            // from the tree instead of copied verbatim from the source span.
+            parent_el.dirty = true;
+        }
     }
 
     /// Chain of arena indices from the root (inclusive) down to `idx`.

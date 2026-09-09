@@ -117,6 +117,39 @@ class SelectionCompositeTest {
         }
     }
 
+    @Test
+    fun `delete removes the selected sidecar leaf from the document`() {
+        val scPath = sidecar
+        Assumptions.assumeTrue(scPath != null, "no sidecar")
+        SidecarClient(listOf(scPath.toString())).use { sc ->
+            val p = SvgEditorPanel(bridge, asyncRendering = false, sidecar = sc)
+            p.loadSvg(RingIconSvg.TEXT)
+            p.debugSetViewportSize(800, 800)
+            p.fitView()
+            val before = p.layout.elements.size
+            org.junit.jupiter.api.Assertions.assertTrue(before >= 2)
+            // Select the ring leaf (blank source id -> node-id selection key), then Delete.
+            val c = p.debugCanvas()
+            val px = (p.debugOffsetX() + 590.0 * p.debugViewScale()).toInt()
+            val py = (p.debugOffsetY() + 522.0 * p.debugViewScale()).toInt()
+            c.dispatchEvent(java.awt.event.MouseEvent(c, java.awt.event.MouseEvent.MOUSE_PRESSED, 0, java.awt.event.MouseEvent.BUTTON1_DOWN_MASK, px, py, 1, false, java.awt.event.MouseEvent.BUTTON1))
+            c.dispatchEvent(java.awt.event.MouseEvent(c, java.awt.event.MouseEvent.MOUSE_RELEASED, 0, 0, px, py, 1, false, java.awt.event.MouseEvent.BUTTON1))
+            org.junit.jupiter.api.Assertions.assertNotNull(p.selectedElementId)
+            p.deleteSelected()
+            org.junit.jupiter.api.Assertions.assertNull(p.selectedElementId, "delete clears the selection")
+            org.junit.jupiter.api.Assertions.assertEquals(
+                before - 1,
+                p.layout.elements.size,
+                "the sidecar leaf must be removed from the layout",
+            )
+            org.junit.jupiter.api.Assertions.assertFalse(
+                p.svgSource.contains("translate(-62.060606"),
+                "the deleted ring's source path must leave the document",
+            )
+            p.dispose()
+        }
+    }
+
     private fun nativeLibName(): String {
         val os = System.getProperty("os.name").lowercase()
         return when {

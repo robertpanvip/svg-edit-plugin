@@ -500,6 +500,35 @@ impl Session {
         }))
     }
 
+    /// Removes the subtree rooted at `node_id` from the document and returns the updated SVG
+    /// plus a fresh content frame — mirroring `commit`'s shape so the Kotlin side can adopt the
+    /// result the same way. Ids of the deleted element are gone from the serialized document.
+    pub fn remove(
+        &mut self,
+        node_id: usize,
+        vw: u32,
+        vh: u32,
+        scale: f64,
+        tx: f64,
+        ty: f64,
+    ) -> Result<serde_json::Value, String> {
+        let idx = self
+            .doc
+            .find_by_node_id(node_id)
+            .ok_or_else(|| format!("unknown nodeId {node_id}"))?;
+        self.doc.remove_node(idx);
+        self.rebuild_projection()?;
+        let png = render_tree_viewport(&self.tree, vw, vh, scale, tx, ty)?;
+        let svg = self.doc.serialize(&Mode::Full);
+        Ok(serde_json::json!({
+            "svg": svg,
+            "png": base64_png(&png),
+            "w": vw.clamp(1, MAX_PX),
+            "h": vh.clamp(1, MAX_PX),
+            "elements": self.layout_json()["elements"],
+        }))
+    }
+
     /// Re-renders the current document under a viewport transform
     /// (pan `tx/ty` in pixels, uniform `scale`). This is the viewBox zoom.
     pub fn render_viewport(
@@ -646,6 +675,39 @@ mod tests {
     const WRAPPED_ICON: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" fill="currentColor" class="icon" overflow="hidden" style="width:1em;height:1em;vertical-align:middle" viewBox="0 0 1024 1024">
       <path fill="#666" d="M512 341.333 C416 341.333 341.333 416 341.333 512 S416 682.667 512 682.667 682.667 608 682.667 512 S608 341.333 512 341.333 Z M512 414 C578.1 414 632 467.9 632 512 S578.1 610 512 610 392 556.1 392 512 445.9 414 512 414 Z" transform="translate(-62.060606 9.873278)"/>
     </svg>"##;
+
+    #[test]
+    fn remove_drops_the_subtree_from_svg_layout_and_hits() {
+        let mut s = Session::new(SAMPLE).unwrap();
+        // "box-a" has id=2 (node ids are document order: bg=1, box-a=2, ...); deleting by node
+        // id removes it from the round-tripped source, the layout and hit tests alike.
+        let before = s.layout_json();
+        let before_ids: Vec<u64> = before["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["nodeId"].as_u64().unwrap())
+            .collect();
+        assert!(before_ids.contains(&3), "fixture must contain the deletable node");
+        let out = s.remove(3, 400, 240, 1.0, 0.0, 0.0).unwrap();
+        let svg = out["svg"].as_str().unwrap();
+        assert!(!svg.contains("box-a"), "deleted element must leave the source");
+        assert!(svg.contains("id='bg'"), "siblings must survive untouched");
+        assert!(svg.contains("<!-- drawn by hand -->"), "comments stay");
+        let after = s.layout_json();
+        let ids: Vec<u64> = after["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["nodeId"].as_u64().unwrap())
+            .collect();
+        assert!(!ids.contains(&3));
+        assert_eq!(ids.len(), before_ids.len() - 1);
+        // The deleted shape no longer wins a hit test over the background it sat on.
+        assert_ne!(s.hit_test(30.0, 30.0, 0.5), Some(3));
+        // Deleting an already-deleted node errors instead of corrupting the doc.
+        assert!(s.remove(3, 400, 240, 1.0, 0.0, 0.0).is_err());
+    }
 
     #[test]
     fn hit_test_descends_through_anonymous_wrapper_groups() {

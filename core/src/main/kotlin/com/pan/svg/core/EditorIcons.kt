@@ -42,6 +42,46 @@ object EditorIcons {
         g2.drawRect(2, 2, SIZE - 4, SIZE - 4)
     }
 
+    /**
+     * Transparency-chessboard toggle, two-state like the native image viewer: `on` paints a
+     * solid checkerboard (transparency shown), `off` is the same empty cell grid (transparency
+     * hidden). The states are visually distinct so the toggle reads at a glance.
+     */
+    fun chessboard(on: Boolean): Icon = vectorIcon { g2, pen ->
+        val cell = SIZE / 4.0
+        g2.color = pen
+        if (on) {
+            for (row in 0 until 4) for (col in 0 until 4) {
+                if ((row + col) % 2 == 0) {
+                    g2.fillRect((1 + col * cell).toInt(), (1 + row * cell).toInt(), cell.toInt() - 1, cell.toInt() - 1)
+                }
+            }
+        } else {
+            g2.stroke = BasicStroke(1f)
+            for (row in 0 until 4) for (col in 0 until 4) {
+                g2.drawRect((1 + col * cell).toInt(), (1 + row * cell).toInt(), cell.toInt() - 1, cell.toInt() - 1)
+            }
+        }
+    }
+
+    /**
+     * Image-pixel-grid toggle, two-state: `on` draws the grid lines, `off` is an empty frame so
+     * the two states are visually distinct in the toolbar.
+     */
+    fun grid(on: Boolean): Icon = vectorIcon { g2, pen ->
+        g2.color = pen
+        g2.stroke = BasicStroke(1f)
+        if (on) {
+            for (i in 1 until 4) {
+                val p = (SIZE * i / 4.0).toInt()
+                g2.drawLine(p, 1, p, SIZE - 2)
+                g2.drawLine(1, p, SIZE - 2, p)
+            }
+        } else {
+            g2.drawRect(2, 2, SIZE - 5, SIZE - 5)
+        }
+    }
+
     private fun vectorIcon(body: (Graphics2D, Color) -> Unit): Icon =
         object : Icon {
             override fun getIconWidth(): Int = SIZE

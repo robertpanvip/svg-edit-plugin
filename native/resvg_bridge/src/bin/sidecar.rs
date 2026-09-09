@@ -20,6 +20,9 @@
 //!   `{svg,png,w,h,elements}` — `matrix` is the accumulated root-space drag
 //!   delta in SVG `matrix(a,b,c,d,e,f)` order; the landed `transform` is
 //!   `T_new = A^-1 * M * A * T_old`; `svg` is the round-trip-faithful document.
+//! - `remove` `{nodeId,vw,vh,scale,tx,ty}` → `{svg,png,w,h,elements}` —
+//!   deletes the element subtree (matched by editor node id, so source-blank
+//!   ids work too) and returns the updated document + content frame.
 //! - `renderViewport` `{vw?,vh?,scale?,tx?,ty?}` → `{png,w,h}` (viewBox zoom)
 //!
 //! Any panic inside a handler is caught and turned into an `error` response so
@@ -123,6 +126,13 @@ fn dispatch(session: &mut Option<Session>, method: &str, p: &Value) -> Result<Va
             let (vw, vh) = dims(p);
             let (scale, tx, ty) = view(p);
             s.commit(node_id, m, vw, vh, scale, tx, ty)
+        }
+        "remove" => {
+            let s = session.as_mut().ok_or("no document open")?;
+            let node_id = node_id(p)?;
+            let (vw, vh) = dims(p);
+            let (scale, tx, ty) = view(p);
+            s.remove(node_id, vw, vh, scale, tx, ty)
         }
         "renderViewport" => {
             let s = session.as_ref().ok_or("no document open")?;
