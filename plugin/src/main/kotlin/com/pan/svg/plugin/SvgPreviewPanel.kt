@@ -18,14 +18,12 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Computable
 import com.intellij.openapi.util.UserDataHolderBase
 import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.ui.JBColor
 import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.beans.PropertyChangeListener
 import java.util.concurrent.CopyOnWriteArrayList
-import javax.swing.BorderFactory
 import javax.swing.JComponent
 import javax.swing.JLabel
 import javax.swing.JPanel
@@ -91,32 +89,52 @@ class SvgPreviewPanel(
     private var ownedSidecar: SidecarClient? = null
 
     /**
-     * Bottom status strip mirroring the built-in image viewer's size display: shows the SVG's
-     * pixel dimensions (`W × H px`) and the current zoom. Refreshed on every status emission from
-     * the canvas ([SvgEditorPanel.onStatus]) and on load.
+     * Top-right info label mirroring the built-in image viewer's size display (which sits to the
+     * EAST of the toolbar, at the top-right of the editor): the SVG's pixel dimensions, the
+     * format ("SVG"), the file size and the current zoom, e.g. `1,024x1,024 SVG 3.6KB 70%`.
+     * Refreshed on every status emission from the canvas ([SvgEditorPanel.onStatus]) and on load.
      */
     private val infoValue =
         JLabel(" ").apply {
             horizontalAlignment = SwingConstants.RIGHT
         }
 
-    private val infoBar: JPanel =
+    /** Header row: native platform toolbar centred, the info label pinned to its right end. */
+    private val infoHeader: JPanel =
         JPanel(BorderLayout()).apply {
-            add(infoValue, BorderLayout.EAST)
-            border =
-                BorderFactory.createCompoundBorder(
-                    BorderFactory.createMatteBorder(1, 0, 0, 0, JBColor.border()),
-                    BorderFactory.createEmptyBorder(3, 8, 3, 8),
-                )
+            isOpaque = false
         }
 
     private fun refreshInfo() {
         val canvas = panel ?: return
         val w = canvas.layout.width
         val h = canvas.layout.height
-        val dim = if (w > 0 && h > 0) "${w.roundToInt()} × ${h.roundToInt()} px" else "— × — px"
-        infoValue.text =
-            if (w > 0 && h > 0) "$dim · Zoom ${canvas.getZoomPercent()}%" else dim
+        val dim =
+            if (w > 0 && h > 0) {
+                val g = java.text.DecimalFormat("#,###")
+                "${g.format(w.roundToInt())}x${g.format(h.roundToInt())}"
+            } else {
+                "—x—"
+            }
+        val sb = StringBuilder("$dim SVG")
+        formatFileSize(file.length).takeIf { it.isNotEmpty() }?.let { sb.append(' ').append(it) }
+        sb.append(' ').append(canvas.getZoomPercent()).append('%')
+        infoValue.text = sb.toString()
+    }
+
+    /** Human file size without a space and without a trailing ".0" (`3.6KB`, `12KB`, `1.2MB`). */
+    private fun formatFileSize(bytes: Long): String {
+        if (bytes <= 0) return ""
+        fun trim(v: Double): String =
+            if (v >= 100) v.toLong().toString() else {
+                val s = String.format(java.util.Locale.ROOT, "%.1f", v)
+                s.removeSuffix(".0")
+            }
+        return when {
+            bytes < 1024 -> "${bytes}B"
+            bytes < 1024L * 1024 -> "${trim(bytes / 1024.0)}KB"
+            else -> "${trim(bytes / 1024.0 / 1024.0)}MB"
+        }
     }
 
     private val documentListener =
@@ -297,11 +315,15 @@ class SvgPreviewPanel(
     private fun showCanvas() {
         val canvas = panel ?: return
         val bar = toolbar
-        if (canvas.parent === root && (bar == null || bar.parent === root)) return
+        if (canvas.parent === root && (bar == null || bar.parent === infoHeader)) return
         root.removeAll()
-        bar?.let { root.add(it, BorderLayout.NORTH) }
+        if (bar != null) {
+            infoHeader.removeAll()
+            infoHeader.add(bar, BorderLayout.CENTER)
+            infoHeader.add(infoValue, BorderLayout.EAST)
+            root.add(infoHeader, BorderLayout.NORTH)
+        }
         root.add(canvas, BorderLayout.CENTER)
-        root.add(infoBar, BorderLayout.SOUTH)
         refreshInfo()
         root.revalidate()
         root.repaint()

@@ -61,13 +61,19 @@ object SvgEasyToolbar {
 
     private abstract class PanelToggleAction(
         protected val panel: SvgEditorPanel,
-        text: String,
+        showText: String,
+        hideText: String,
         description: String,
         icon: Icon,
-    ) : ToggleAction(text, description, icon) {
+    ) : ToggleAction(showText, description, icon) {
+        private val show = showText
+        private val hide = hideText
+
         override fun update(e: AnActionEvent) {
             super.update(e)
             e.presentation.isEnabled = panel.isShowing
+            // Native image viewer wording: the action text toggles Show/Hide with its state.
+            e.presentation.text = if (isSelected(e)) hide else show
         }
 
         override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT
@@ -148,7 +154,13 @@ object SvgEasyToolbar {
     }
 
     private class GridToggleAction(panel: SvgEditorPanel) :
-        PanelToggleAction(panel, "Show Grid", "Show or hide the image-pixel grid", AllIcons.Graph.Grid) {
+        PanelToggleAction(
+            panel,
+            "Show Grid",
+            "Hide Grid",
+            "Show or hide grid lines over the image",
+            AllIcons.Graph.Grid,
+        ) {
         override fun isSelected(e: AnActionEvent): Boolean = panel.isGrid()
 
         override fun setSelected(e: AnActionEvent, state: Boolean) {
@@ -159,7 +171,8 @@ object SvgEasyToolbar {
     private class ChessboardToggleAction(panel: SvgEditorPanel) :
         PanelToggleAction(
             panel,
-            "Show Transparency",
+            "Show Chessboard",
+            "Hide Chessboard",
             "Show or hide the transparency chessboard",
             AllIcons.Actions.Preview,
         ) {
