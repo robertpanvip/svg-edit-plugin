@@ -461,6 +461,115 @@ object SvgUtils {
         return sb.toString()
     }
 
+    // ---- structural editing helpers (delete / duplicate / reorder) ----
+
+    /** How to move an element among its siblings in the source (`FRONT` = topmost/last). */
+    enum class ReorderDir { FRONT, FORWARD, BACKWARD, BACK }
+
+    /**
+     * Remove the element with `id` from the source (its open tag plus, when present, its entire
+     * children through the matching close tag). Returns the new SVG, or the original string
+     * unchanged when no element with that id exists.
+     */
+    fun removeElement(
+        svg: String,
+        id: String,
+    ): String {
+        val spans = scanTags(svg)
+        val target = spans.firstOrNull { it.id == id } ?: return svg
+        val start = target.openStart
+        val end = if (target.closeStart >= 0) target.closeEnd else target.openEnd
+        return svg.substring(0, start) + svg.substring(end)
+    }
+
+    /**
+     * Clone the element with `id` (its open tag and, when present, its whole subtree through the
+     * matching close tag), giving the copy a fresh unique id, and insert it immediately after the
+     * original in the same parent. Returns the resulting SVG together with the new element's id,
+     * or null when no element with that id exists. The clone renders at the original's position;
+     * hosts normally translate it by calling [applyTranslate] afterwards so the paste is visible.
+     */
+    fun duplicateElement(
+        svg: String,
+        id: String,
+    ): Pair<String, String>? {
+        val spans = scanTags(svg)
+        val target = spans.firstOrNull { it.id == id } ?: return null
+        val end = if (target.closeStart >= 0) target.closeEnd else target.openEnd
+        val chunk = svg.substring(target.openStart, end)
+        val newId = nextUniqueId(svg, "copy-of-$id")
+        val cloned = retagFirstId(chunk, newId)
+        return (svg.substring(0, end) + cloned + svg.substring(end)) to newId
+    }
+
+    /**
+     * Move the element with `id` among its siblings by [dir]. `FRONT`/`BACK` jump to the top/
+     * bottom of the sibling list; `FORWARD`/`BACKWARD` shift by one position (toward the front/
+     * back — later siblings draw on top). Returns the new SVG, or the original unchanged when the
+     * element is missing, sole child, or already at the requested end.
+     */
+    fun reorderElement(
+        svg: String,
+        id: String,
+        dir: ReorderDir,
+    ): String {
+        val spans = scanTags(svg)
+        val target = spans.firstOrNull { it.id == id } ?: return svg
+        // Siblings = other elements sharing the target's immediate parent context. The root
+        // <svg> element must be excluded: top-level elements share its (null) parent context,
+        // but the document root is a container, never a reorderable sibling.
+        val isRootSvg: (TagSpan) -> Boolean = { s ->
+            svg.substring(s.openStart, s.openEnd).trimStart().startsWith("<svg", ignoreCase = true)
+        }
+        val siblings = spans.filter { it !== target && !isRootSvg(it) && it.parentId == target.parentId }
+        if (siblings.isEmpty()) return svg
+        val ordered =
+            (siblings + target)
+                .sortedBy { it.openStart }
+        val idx = ordered.indexOf(target)
+        val n = ordered.size
+        val newIdx =
+            when (dir) {
+                ReorderDir.FRONT -> n - 1
+                ReorderDir.BACK -> 0
+                ReorderDir.FORWARD -> (idx + 1).coerceAtMost(n - 1)
+                ReorderDir.BACKWARD -> (idx - 1).coerceAtLeast(0)
+            }
+        if (newIdx == idx) return svg
+        val chunkStart = target.openStart
+        val chunkEnd = if (target.closeStart >= 0) target.closeEnd else target.openEnd
+        val chunk = svg.substring(chunkStart, chunkEnd)
+        val s2 = svg.substring(0, chunkStart) + svg.substring(chunkEnd)
+        // Re-locate siblings in the trimmed source (the target is gone, so sibs2 has n-1 entries).
+        val sibs2 = scanTags(s2).filter { !isRootSvg(it) && it.parentId == target.parentId }
+        val ins =
+            if (newIdx < sibs2.size) {
+                sibs2[newIdx].openStart
+            } else {
+                val last = sibs2.last()
+                if (last.closeStart >= 0) last.closeEnd else last.openEnd
+            }
+        return s2.substring(0, ins) + chunk + s2.substring(ins)
+    }
+
+    /** A unique `id` (relative to the existing ids in `svg`) whose name starts with `base`. */
+    fun nextUniqueId(
+        svg: String,
+        base: String,
+    ): String {
+        val used = scanTags(svg).mapNotNull { it.id }.toHashSet()
+        val root = if (base.isBlank()) "svg-el" else base
+        var n = 1
+        while (used.contains("$root-$n")) n++
+        return "$root-$n"
+    }
+
+    /** Replace the FIRST `id="..."` attribute in `tag`/`chunk` with `newId` (the element's own id). */
+    private fun retagFirstId(chunk: String, newId: String): String {
+        val m = Regex("""\bid\s*=\s*["']([^"']*)["']""").find(chunk) ?: return chunk
+        return chunk.replaceRange(m.range, "id=\"$newId\"")
+    }
+
     // ---- private tag-scanning helpers (used by soloElement) ----
 
     private data class TagSpan(

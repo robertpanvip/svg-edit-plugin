@@ -144,6 +144,19 @@ class SvgEditorPanel(
     private var pendingHoverId: String? = null
     private var selectedId: String? = null
 
+    /**
+     * Ordered set of currently selected element ids (insertion order = selection order; the
+     * last added is the primary, mirrored by [selectedId]). Size 1 is a plain single selection;
+     * >1 is a multi-selection that moves as a group.
+     */
+    private val selectedIds = LinkedHashSet<String>()
+
+    /** Ids captured by Ctrl+C, pasted by [pasteClipboard]. */
+    private val clipboard = mutableListOf<String>()
+
+    /** True while a multi-element selection is being dragged as one group in MOVE tool. */
+    private var groupDrag = false
+
     /** Transparency chessboard (IDEA-style) drawn behind the image. On by default. */
     private var chessboardEnabled = true
 
@@ -292,7 +305,7 @@ class SvgEditorPanel(
         } else {
             engine.loadLayoutOnly(text)
         }
-        selectedId = null
+        clearSelection()
         hoveredId = null
         pendingHoverId = null
         interaction.selected = null
@@ -315,6 +328,210 @@ class SvgEditorPanel(
 
     /** Id of the currently selected element, or null. */
     val selectedElementId: String? get() = selectedId
+
+    /** Ids of all currently selected elements, in selection order. */
+    val selectedElementIds: List<String> get() = selectedIds.toList()
+
+    // ---- structural editing API (keyboard-driven, also callable from host menus) ----
+
+    /** Alignment axis/mode for [alignSelection]. */
+    enum class Align { LEFT, CENTER_H, RIGHT, TOP, MIDDLE, BOTTOM }
+
+    /** Distribution axis for [distributeSelection]. */
+    enum class Distribute { HORIZONTAL, VERTICAL }
+
+    /** Layer-reorder direction, mapping to [SvgUtils.ReorderDir]. */
+    enum class Reorder { FRONT, FORWARD, BACKWARD, BACK }
+
+    /** Select every element that has an id (removes the previous selection). */
+    fun selectAll() {
+        val ids = engine.layout.elements.filter { it.id.isNotBlank() }.map { it.id }
+        if (ids.isEmpty()) return
+        setSelection(ids, ids.last())
+        emitStatus()
+    }
+
+    /** Delete all selected elements from the document. */
+    fun deleteSelected() {
+        if (selectedIds.isEmpty()) return
+        var changed = false
+        for (id in selectedIds.toList()) changed = engine.deleteElement(id) || changed
+        if (changed) {
+            clearSelection()
+            onEdit?.invoke()
+        }
+        refreshStructural(null)
+    }
+
+    /** Duplicate (paste) the given element ids at a small offset; new copies become the selection. */
+    fun duplicateIds(ids: Collection<String>) {
+        if (ids.isEmpty()) return
+        val newIds = mutableListOf<String>()
+        var n = 1
+        for (id in ids.distinct()) {
+            val newId = engine.duplicateElement(id, 10.0 * n, 10.0 * n)
+            if (newId != null) newIds.add(newId)
+            n++
+        }
+        if (newIds.isEmpty()) return
+        onEdit?.invoke()
+        setSelection(newIds, newIds.last())
+        refreshStructural(selectedId)
+    }
+
+    /** Pause the current id-based copy buffer (Ctrl+C). */
+    fun copySelection() {
+        clipboard.clear()
+        clipboard.addAll(selectedIds)
+    }
+
+    /** Paste the last [copySelection] buffer at an offset (Ctrl+V). */
+    fun pasteClipboard() = duplicateIds(clipboard)
+
+    /** Nudge the selection by `(dx, dy)` canvas units (arrow keys). */
+    fun nudgeSelection(dx: Double, dy: Double) {
+        if (selectedIds.isEmpty()) return
+        var changed = false
+        for (id in selectedIds.toList()) changed = engine.moveElement(id, dx, dy) || changed
+        if (changed) onEdit?.invoke()
+        if (changed) refreshStructural(selectedId)
+        emitStatus()
+    }
+
+    /** Move the selected elements onto the given alignment edge/axis of the selection bounds. */
+    fun alignSelection(a: Align) {
+        val els = selectedIds.mapNotNull { engine.layout.byId(it) }
+        if (els.size < 2) return
+        val minX = els.minOf { it.x }
+        val maxRight = els.maxOf { it.right }
+        val minY = els.minOf { it.y }
+        val maxBottom = els.maxOf { it.bottom }
+        val midX = minX + (maxRight - minX) / 2.0
+        val midY = minY + (maxBottom - minY) / 2.0
+        var changed = false
+        for (el in els) {
+            val tx =
+                when (a) {
+                    Align.LEFT -> minX
+                    Align.CENTER_H -> midX - el.width / 2.0
+                    Align.RIGHT -> maxRight - el.width
+                    else -> el.x
+                }
+            val ty =
+                when (a) {
+                    Align.TOP -> minY
+                    Align.MIDDLE -> midY - el.height / 2.0
+                    Align.BOTTOM -> maxBottom - el.height
+                    else -> el.y
+                }
+            val dx = tx - el.x
+            val dy = ty - el.y
+            if (dx != 0.0 || dy != 0.0) changed = engine.moveElement(el.id, dx, dy) || changed
+        }
+        if (changed) {
+            onEdit?.invoke()
+            refreshStructural(selectedId)
+        }
+        emitStatus()
+    }
+
+    /**
+     * Distribute the selected elements with even gaps along an axis (the two outermost elements
+     * stay fixed; the middle ones are spaced so the gap between consecutive edges is uniform).
+     */
+    fun distributeSelection(d: Distribute) {
+        val els = selectedIds.mapNotNull { engine.layout.byId(it) }
+        if (els.size < 3) return
+        val horizontal = d == Distribute.HORIZONTAL
+        val sorted = if (horizontal) els.sortedBy { it.x } else els.sortedBy { it.y }
+        val first = sorted.first()
+        val last = sorted.last()
+        val span = if (horizontal) (last.right - first.x) else (last.bottom - first.y)
+        val total = if (horizontal) sorted.sumOf { it.width } else sorted.sumOf { it.height }
+        val gap = (span - total) / (sorted.size - 1)
+        var changed = false
+        var cursor = if (horizontal) first.x + first.width + gap else first.y + first.height + gap
+        for (el in sorted.subList(1, sorted.size - 1)) {
+            val tx = if (horizontal) cursor else el.x
+            val ty = if (horizontal) el.y else cursor
+            val dx = tx - el.x
+            val dy = ty - el.y
+            if (dx != 0.0 || dy != 0.0) changed = engine.moveElement(el.id, dx, dy) || changed
+            cursor += (if (horizontal) el.width else el.height) + gap
+        }
+        if (changed) {
+            onEdit?.invoke()
+            refreshStructural(selectedId)
+        }
+        emitStatus()
+    }
+
+    /** Reorder the selected elements in the layer stack (source document order). */
+    fun reorderSelection(r: Reorder) {
+        if (selectedIds.isEmpty()) return
+        val dir =
+            when (r) {
+                Reorder.FRONT -> SvgUtils.ReorderDir.FRONT
+                Reorder.FORWARD -> SvgUtils.ReorderDir.FORWARD
+                Reorder.BACKWARD -> SvgUtils.ReorderDir.BACKWARD
+                Reorder.BACK -> SvgUtils.ReorderDir.BACK
+            }
+        var changed = false
+        for (id in selectedIds.toList()) changed = engine.reorderElement(id, dir) || changed
+        if (changed) {
+            onEdit?.invoke()
+            refreshStructural(selectedId)
+        }
+        emitStatus()
+    }
+
+    // ---- selection helpers -------------------------------------------------
+
+    /** Whether [id] is part of the current selection. */
+    private fun isSelected(id: String): Boolean = selectedId == id || id in selectedIds
+
+    /**
+     * Replace the whole selection with `ids` and make `primary` the active element. `ids` must
+     * contain `primary`. This is the single entry point for changing the selected set so the
+     * panel renders and layers stay consistent. Returns the primary id (or null if empty).
+     */
+    private fun setSelection(
+        ids: Collection<String>,
+        primary: String,
+    ): String? {
+        selectedIds.clear()
+        for (id in ids.distinct()) {
+            if (engine.layout.byId(id) == null) continue // drop stale/unknown ids
+            selectedIds.add(id)
+        }
+        if (selectedIds.isEmpty()) {
+            selectedId = null
+            groupDrag = false
+            clearLayers()
+            canvas.repaint()
+            return null
+        }
+        // Primary must be in the set (fall back to the topmost if it was dropped as unknown).
+        val p = if (primary in selectedIds) primary else selectedIds.last()
+        selectedId = p
+        groupDrag = false
+        if (layerId != p) requestLayers(p)
+        canvas.repaint()
+        return p
+    }
+
+    /** Collapse the selection to the single element `id` (and make it primary). */
+    private fun selectOnly(id: String): String? = setSelection(listOf(id), id)
+
+    /** Clear the selection entirely. */
+    private fun clearSelection() {
+        selectedIds.clear()
+        selectedId = null
+        groupDrag = false
+        interaction.selected = null
+        interaction.selectedHandle = null
+        clearLayers()
+    }
 
     /** Current zoom factor (1.0 = fit). */
     fun getZoom(): Double = zoom
@@ -809,6 +1026,22 @@ class SvgEditorPanel(
     }
 
     /**
+     * Refresh the base raster + colour-id pick and re-warm drag layers after a structural edit
+     * (delete / duplicate / reorder / align / nudge) that changed the source out-of-band. Unlike
+     * [refreshAfterEdit], `primary` may be null (a deleted selection) — in that case the layers
+     * are cleared and only the content raster is re-produced.
+     */
+    private fun refreshStructural(primary: String?) {
+        clearLayers()
+        staticDirty = true
+        requestContent()
+        if (primary != null) {
+            if (scheduler == null) rebuildLayersSync(primary) else requestLayers(primary)
+        }
+        canvas.repaint()
+    }
+
+    /**
      * Refresh rasters after a committed edit (engine re-parsed the layout, zero raster work).
      *
      * Async mode: render the full scene **immediately and synchronously** into [offscreen] and
@@ -1045,10 +1278,7 @@ class SvgEditorPanel(
         canvas.addKeyListener(
             object : KeyAdapter() {
                 override fun keyPressed(e: KeyEvent) {
-                    if (e.keyCode == KeyEvent.VK_SPACE && !spaceDown) {
-                        spaceDown = true
-                        updateCursor()
-                    }
+                    onKeyPressed(e)
                 }
 
                 override fun keyReleased(e: KeyEvent) {
@@ -1059,6 +1289,80 @@ class SvgEditorPanel(
                 }
             },
         )
+    }
+
+    /**
+     * Handle a keyboard command on the canvas. This is the single entry point for editing keys
+     * (delete/copy/paste/select-all/arrows). The canvas key listener forwards here, and hosts /
+     * tests can also dispatch into it directly — headless AWT drops synthetic `KeyEvent`s sent via
+     * `Component.dispatchEvent` (unlike mouse events), so testing through this method exercises the
+     * exact same match on the key mapping without needing focus.
+     *
+     * @return true when the key was an editing command (consumed).
+     */
+    fun onKeyPressed(e: KeyEvent): Boolean {
+        // End any in-flight mouse edit before a structural keyboard command so the
+        // move/resize/rotate result is committed first.
+        if (interaction.state != InteractionController.State.IDLE) return false
+        return when {
+            e.keyCode == KeyEvent.VK_SPACE && !spaceDown -> {
+                spaceDown = true
+                updateCursor()
+                false
+            }
+
+            e.keyCode == KeyEvent.VK_ESCAPE -> {
+                clearSelection()
+                canvas.repaint()
+                emitStatus()
+                true
+            }
+
+            // Delete / Backspace: remove the selection from the document.
+            e.keyCode == KeyEvent.VK_DELETE || e.keyCode == KeyEvent.VK_BACK_SPACE -> {
+                deleteSelected()
+                e.consume()
+                true
+            }
+
+            e.isControlDown && e.keyCode == KeyEvent.VK_C -> {
+                copySelection()
+                e.consume()
+                true
+            }
+
+            e.isControlDown && e.keyCode == KeyEvent.VK_V -> {
+                pasteClipboard()
+                e.consume()
+                true
+            }
+
+            e.isControlDown && e.keyCode == KeyEvent.VK_A -> {
+                selectAll()
+                e.consume()
+                true
+            }
+
+            // Arrow keys: nudge by 1 canvas unit, 10 with Shift held.
+            e.keyCode == KeyEvent.VK_UP -> {
+                nudgeSelection(0.0, if (e.isShiftDown) -10.0 else -1.0)
+                true
+            }
+            e.keyCode == KeyEvent.VK_DOWN -> {
+                nudgeSelection(0.0, if (e.isShiftDown) 10.0 else 1.0)
+                true
+            }
+            e.keyCode == KeyEvent.VK_LEFT -> {
+                nudgeSelection(if (e.isShiftDown) -10.0 else -1.0, 0.0)
+                true
+            }
+            e.keyCode == KeyEvent.VK_RIGHT -> {
+                nudgeSelection(if (e.isShiftDown) 10.0 else 1.0, 0.0)
+                true
+            }
+
+            else -> false
+        }
     }
 
     private fun viewportPoint(e: MouseEvent): Point = SwingUtilities.convertPoint(e.component, e.point, scrollPane.viewport)
@@ -1174,22 +1478,29 @@ class SvgEditorPanel(
         // select" only exists under the MARQUEE tool).
         val hit = hitTestAt(ix, iy)
         if (hit == null && !nearSelectionHandles(x, y)) {
-            interaction.selected = null
-            interaction.selectedHandle = null
-            selectedId = null
-            clearLayers()
+            clearSelection()
             canvas.repaint()
             return
         }
         interaction.onMousePressed(engine.layout, ix, iy, tol)
         val newSel = interaction.selected?.id
-        selectedId = newSel
-        if (newSel != null) {
-            // The hover preheat may already hold this element's layers (warm cache); re-issuing
-            // the identical render would just delay the first drag frame for no visual gain.
+        if (newSel != null && newSel in selectedIds && selectedIds.size > 1) {
+            // Pressed on an element of an existing multi-selection (primary or not): keep the
+            // whole set and make this element the moving primary — a group drag moves them all
+            // together. A single selection falls through to the normal (idempotent) path.
+            selectedId = newSel
+            groupDrag = true
             if (layerId != newSel) requestLayers(newSel)
+            staticDirty = true
+            canvas.repaint()
+            return
+        }
+        if (newSel != null) {
+            // A fresh single selection collapses the set (or, if the currently-selected single
+            // element was re-pressed, selectOnly just keeps it as-is).
+            selectOnly(newSel)
         } else {
-            clearLayers()
+            clearSelection()
         }
         staticDirty = true
         canvas.repaint()
@@ -1238,14 +1549,9 @@ class SvgEditorPanel(
             val hit = hitTestAt(ix, iy)
             if (hit != null) {
                 interaction.selected = hit
-                interaction.selectedHandle = null
-                selectedId = hit.id
-                if (layerId != hit.id) requestLayers(hit.id)
+                selectOnly(hit.id)
             } else {
-                interaction.selected = null
-                interaction.selectedHandle = null
-                selectedId = null
-                clearLayers()
+                clearSelection()
             }
             canvas.repaint()
             emitStatus()
@@ -1255,23 +1561,24 @@ class SvgEditorPanel(
         val sy = (r.y - offsetY) / viewScale
         val sw = r.width / viewScale
         val sh = r.height / viewScale
-        // Precise band hit via the colour-ID canvas when available (topmost PAINTED leaf inside
-        // the band); otherwise the bounding-box intersect (topmost element), matching the z-order.
-        val top =
-            if (pickImage != null && vpPreview == null) {
-                regionPickTop(sx, sy, sw, sh)
-            } else {
-                engine.layout.intersecting(sx, sy, sw, sh).lastOrNull()
+        // Multi-select: every element whose bounding box is FULLY inside the band becomes
+        // selected and moves as a group. `contained` (rather than "intersect") naturally
+        // excludes a full-canvas background rect and any element the box is merely touching.
+        val contained =
+            engine.layout.elements.filter { el ->
+                el.id.isNotBlank() &&
+                    el.x >= sx &&
+                    el.y >= sy &&
+                    el.right <= sx + sw &&
+                    el.bottom <= sy + sh
             }
-        if (top != null) {
-            interaction.selected = top
-            interaction.selectedHandle = null
-            selectedId = top.id
-            if (layerId != top.id) requestLayers(top.id)
+        val primary = contained.maxByOrNull { it.index }?.id
+        if (primary != null) {
+            interaction.selected = engine.layout.byId(primary)
+            if (interaction.selected == null) interaction.selected = contained.last()
+            setSelection(contained.map { it.id }, primary)
         } else {
-            interaction.selected = null
-            selectedId = null
-            clearLayers()
+            clearSelection()
         }
         canvas.repaint()
         emitStatus()
@@ -1314,6 +1621,22 @@ class SvgEditorPanel(
         return elementForPickValue(best)
     }
 
+    /**
+     * Apply `(dx, dy)` (canvas units) to every selected element, committing each move to the
+     * source. Returns true when every element moved. Used by a multi-selection group drag.
+     */
+    private fun applyGroupMove(
+        dx: Double,
+        dy: Double,
+    ): Boolean {
+        if (dx == 0.0 && dy == 0.0) return false
+        var allCommitted = true
+        for (id in selectedIds) {
+            if (!engine.moveElement(id, dx, dy)) allCommitted = false
+        }
+        return allCommitted
+    }
+
     private fun handleRelease() {
         if (marqueeOrigin != null || marqueeRect != null) {
             finishMarquee()
@@ -1323,9 +1646,15 @@ class SvgEditorPanel(
         var committed = false
         when (res) {
             is InteractionController.EditResult.Move -> {
-                committed = commitSidecar(res) ?: engine.moveElement(res.element.id, res.dx, res.dy)
-                selectedId = res.element.id
-                if (committed) refreshAfterEdit(res.element.id)
+                if (groupDrag && selectedIds.size > 1) {
+                    committed = applyGroupMove(res.dx, res.dy)
+                } else {
+                    committed =
+                        commitSidecar(res) ?: engine.moveElement(res.element.id, res.dx, res.dy)
+                    selectedId = res.element.id
+                }
+                groupDrag = false
+                if (committed) refreshAfterEdit(selectedId ?: res.element.id)
             }
             is InteractionController.EditResult.Resize -> {
                 committed =
@@ -1490,6 +1819,16 @@ class SvgEditorPanel(
     ) {
         debugViewport = Dimension(w, h)
         recomputeView()
+    }
+
+    /** Test hook: replace the selection with `ids` (last member becomes primary). */
+    fun debugSetSelection(ids: List<String>) {
+        if (ids.isEmpty()) {
+            clearSelection()
+            canvas.repaint()
+        } else {
+            setSelection(ids, ids.last())
+        }
     }
 
     /** Test hook: render the canvas onto an off-screen image for visual inspection.

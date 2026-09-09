@@ -235,6 +235,45 @@ class SvgEditorEngine(
         layout = newLayout
         captureGeom()
     }
+
+    /** Delete the element with `id` from the source and re-parse. False when no such element. */
+    fun deleteElement(id: String): Boolean {
+        val updated = SvgUtils.removeElement(svg, id)
+        if (updated == svg) return false
+        svg = updated
+        reloadLayout()
+        return true
+    }
+
+    /**
+     * Clone the element with `id`, offset the copy by `(dx, dy)` canvas units so it is visible,
+     * and re-parse. Returns the new element's id, or null when the source element is missing.
+     */
+    fun duplicateElement(
+        id: String,
+        dx: Double,
+        dy: Double,
+    ): String? {
+        val dup = SvgUtils.duplicateElement(svg, id) ?: return null
+        svg = dup.first
+        reloadLayout()
+        val newId = dup.second
+        if (dx != 0.0 || dy != 0.0) moveElement(newId, dx, dy)
+        return newId
+    }
+
+    /** Move the element with `id` among its siblings (see [SvgUtils.ReorderDir]). */
+    fun reorderElement(
+        id: String,
+        dir: SvgUtils.ReorderDir,
+    ): Boolean {
+        if (layout.byId(id) == null) return false
+        val updated = SvgUtils.reorderElement(svg, id, dir)
+        if (updated == svg) return false
+        svg = updated
+        reloadLayout()
+        return true
+    }
 }
 
 /** Multiply two 2x3 affine matrices `[a,b,c,d,e,f]` (column-major: [[a,c,e],[b,d,f]]). */
