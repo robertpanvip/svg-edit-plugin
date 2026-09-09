@@ -1502,8 +1502,13 @@ class SvgEditorPanel(
         if (hit == null && selectedBoxHit) {
             // Re-target the controller at the currently selected element so onMousePressed
             // enters MOVE on it (its box contains the pointer) instead of falling through to
-            // deselect. The selection itself is unchanged.
-            selectedId?.let { sid -> engine.layout.byId(sid)?.let { fresh -> interaction.selected = fresh } }
+            // deselect. The selection itself is unchanged. Keep the selected key as the element
+            // id (sidecar leaves have a blank source id).
+            selectedId?.let { sid ->
+                engine.layout.byId(sid)?.let { fresh ->
+                    interaction.selected = if (fresh.id.isBlank()) fresh.copy(id = sid) else fresh
+                }
+            }
         }
         interaction.onMousePressed(engine.layout, ix, iy, tol)
         val newSel = interaction.selected?.id
@@ -1594,26 +1599,40 @@ class SvgEditorPanel(
         // box over content must not silently start moving the page background with it.
         val w = engine.layout.width
         val h = engine.layout.height
+        // Sidecar leaves keep their selection key as the node-id string (their source id is
+        // blank), so blank ids are selectable whenever a non-zero node id exists — same key the
+        // exact hit tests use. Transparent usvg group wrappers (blank id AND no node id) stay out.
+        fun selectable(el: SvgElement): Boolean =
+            el.id.isNotBlank() || el.nodeId != 0L
+        fun keyOf(el: SvgElement): String = el.id.ifBlank { el.nodeId.toString() }
         val hit =
             engine.layout.elements.filter { el ->
-                el.id.isNotBlank() &&
+                selectable(el) &&
                     el.x < sx + sw &&
                     el.right > sx &&
                     el.y < sy + sh &&
                     el.bottom > sy &&
                     !(el.x <= 0.0 && el.y <= 0.0 && el.right >= w - 0.5 && el.bottom >= h - 0.5)
             }
-        val primary = hit.maxByOrNull { it.index }?.id
+        val primary = hit.maxByOrNull { it.index }
         if (primary != null) {
-            interaction.selected = engine.layout.byId(primary)
-            if (interaction.selected == null) interaction.selected = hit.last()
-            setSelection(hit.map { it.id }, primary)
+            val primaryKey = keyOf(primary)
+            interaction.selected = keyedElement(engine.layout.byId(primaryKey) ?: primary)
+            setSelection(hit.map { keyOf(it) }, primaryKey)
         } else {
             clearSelection()
         }
         canvas.repaint()
         emitStatus()
     }
+
+    /**
+     * Sidecar leaves keep their selection key in the node-id string; their source `id` is blank.
+     * Give the controller an element carrying that key, or a later press re-binding / group move
+     * would fail selectOnly("") and silently drop the selection.
+     */
+    private fun keyedElement(el: SvgElement): SvgElement =
+        if (el.id.isBlank() && el.nodeId != 0L) el.copy(id = el.nodeId.toString()) else el
 
     /**
      * Topmost PAINTED leaf inside the SVG-space rectangle `(sx, sy, sw, sh)`, read from the
@@ -1661,9 +1680,25 @@ class SvgEditorPanel(
         dy: Double,
     ): Boolean {
         if (dx == 0.0 && dy == 0.0) return false
+        val sc = sidecar
+        val viaSidecar = sc != null && sidecarActive
         var allCommitted = true
-        for (id in selectedIds) {
-            if (!engine.moveElement(id, dx, dy)) allCommitted = false
+        // Each commit refreshes the source + layout (sidecar round-trips / local re-parse), so
+        // resolve every element fresh inside the loop. Sidecar leaves are moved by their node id
+        // (their blank source id can't be matched by the legacy source-rewriting engine edits).
+        for (id in selectedIds.toList()) {
+            val el = engine.layout.byId(id)
+            if (el == null) {
+                allCommitted = false
+                continue
+            }
+            val moved =
+                if (viaSidecar && el.nodeId != 0L) {
+                    commitSidecar(InteractionController.EditResult.Move(el, dx, dy)) == true
+                } else {
+                    engine.moveElement(id, dx, dy)
+                }
+            if (!moved) allCommitted = false
         }
         return allCommitted
     }

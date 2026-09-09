@@ -160,6 +160,34 @@ class SidecarRingHitTest {
         }
     }
 
+    @Test
+    fun `sidecar marquee selects both leaves and group-drag moves them`() {
+        SidecarClient(listOf(sidecar.toString())).use { sc ->
+            val p = SvgEditorPanel(bridge, asyncRendering = false, sidecar = sc)
+            p.loadSvg(RingIconSvg.TEXT)
+            p.debugSetViewportSize(800, 800)
+            p.fitView()
+            p.setTool(SvgEditorPanel.Tool.MARQUEE)
+            // Rubber band that clearly contains BOTH the ring (279..621 x 351..693) and the
+            // gear (658..984 x 313..641).
+            pressAt(p, 100.0, 150.0)
+            dragAt(p, 1000.0, 800.0)
+            releaseAt(p, 1000.0, 800.0)
+            val keys = p.selectedElementIds
+            assertTrue(keys.size >= 2, "a full marquee must select both sidecar leaves, got $keys")
+            assertTrue("2" in keys && "3" in keys, "marquee must select the gear(2) and ring(3), got $keys")
+            // Group-drag under the MOVE tool moves both together.
+            p.setTool(SvgEditorPanel.Tool.MOVE)
+            val before = p.svgSource
+            pressAt(p, 590.0, 522.0) // ring band = a selected member
+            dragAt(p, 640.0, 552.0)
+            releaseAt(p, 640.0, 552.0)
+            assertTrue(p.svgSource != before, "group-drag after the marquee must commit a move")
+            assertTrue(p.selectedElementIds.size >= 2, "selection must survive the group drag")
+            p.dispose()
+        }
+    }
+
     private fun assertTrue(cond: Boolean, msg: String) {
         org.junit.jupiter.api.Assertions.assertTrue(cond, msg)
     }
