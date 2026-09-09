@@ -1,5 +1,6 @@
 package com.pan.svg.plugin
 
+import com.pan.svg.core.EditorIcons
 import com.pan.svg.core.SvgEditorPanel
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.ActionManager
@@ -75,14 +76,17 @@ object SvgEasyToolbar {
     /**
      * Mutually exclusive tool toggles ("Move" vs "Box Select"). Both read the live tool from
      * [SvgEditorPanel.getTool], so clicking one automatically un-presses the other on the next
-     * toolbar refresh; clicking the already-active tool keeps it active (radio behaviour).
+     * toolbar refresh; clicking the already-active tool keeps it active (radio behaviour). Each
+     * tool carries its own semantic icon (see [com.pan.svg.core.EditorIcons]) so the two buttons
+     * are visually distinct in the icon-first IDE toolbar.
      */
     private abstract class ToolToggleAction(
         protected val panel: SvgEditorPanel,
         text: String,
         description: String,
+        icon: Icon,
         private val tool: SvgEditorPanel.Tool,
-    ) : ToggleAction(text, description, null) {
+    ) : ToggleAction(text, description, icon) {
         override fun isSelected(e: AnActionEvent): Boolean = panel.getTool() == tool
 
         override fun setSelected(e: AnActionEvent, state: Boolean) {
@@ -98,10 +102,22 @@ object SvgEasyToolbar {
     }
 
     private class MoveToolAction(panel: SvgEditorPanel) :
-        ToolToggleAction(panel, "Move", "Move: select, drag, resize and rotate elements", SvgEditorPanel.Tool.MOVE)
+        ToolToggleAction(
+            panel,
+            "Move",
+            "Move: select, drag, resize and rotate elements",
+            EditorIcons.moveTool(),
+            SvgEditorPanel.Tool.MOVE,
+        )
 
     private class MarqueeToolAction(panel: SvgEditorPanel) :
-        ToolToggleAction(panel, "Box Select", "Box Select: drag a rectangle to select", SvgEditorPanel.Tool.MARQUEE)
+        ToolToggleAction(
+            panel,
+            "Box Select",
+            "Box Select: drag a rectangle to select",
+            EditorIcons.boxSelectTool(),
+            SvgEditorPanel.Tool.MARQUEE,
+        )
 
     private class ZoomInAction(panel: SvgEditorPanel) :
         PanelAction(panel, "Zoom In", "Zoom in", AllIcons.General.ZoomIn) {

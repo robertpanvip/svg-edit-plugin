@@ -133,6 +133,22 @@ class MouseEventDispatchTest {
     }
 
     @Test
+    fun `MARQUEE box-select intersects elements but never the full-canvas background`() {
+        val panel = newPanel()
+        val c = panel.debugCanvas()
+        panel.setTool(SvgEditorPanel.Tool.MARQUEE)
+        // A rubber band crossing box-a (and therefore the whole-canvas bg rect too): the
+        // intersecting box-a is selected, while the document backdrop (full-document `bg` rect)
+        // must NOT join the marquee — otherwise a box-select over content would start moving the
+        // page background along with it.
+        c.dispatchEvent(press(c, 30, 20))
+        c.dispatchEvent(drag(c, 90, 80))
+        c.dispatchEvent(release(c, 90, 80))
+        assertEquals(listOf("box-a"), panel.selectedElementIds)
+        panel.dispose()
+    }
+
+    @Test
     fun `MOVE click on empty canvas deselects`() {
         val panel = newPanel()
         val c = panel.debugCanvas()

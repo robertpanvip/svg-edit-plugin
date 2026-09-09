@@ -82,18 +82,27 @@ fun createEditorToolbar(
         return b
     }
 
-    /** Text-only radio button for the interaction tools (Move / Box Select). */
+    /**
+     * Tool radio button for the interaction tools (Move / Box Select), with the semantic icon
+     * from [EditorIcons] next to its text label so the two modes are always distinguishable.
+     */
     fun toolToggle(
         text: String,
         tooltip: String,
         tool: SvgEditorPanel.Tool,
-    ): JToggleButton =
-        JToggleButton(text).apply {
+    ): JToggleButton {
+        val icon =
+            when (tool) {
+                SvgEditorPanel.Tool.MOVE -> EditorIcons.moveTool()
+                SvgEditorPanel.Tool.MARQUEE -> EditorIcons.boxSelectTool()
+            }
+        return JToggleButton(text, icon).apply {
             this.toolTipText = tooltip
             isFocusable = false
             margin = Insets(4, 6, 4, 6)
             isSelected = panel.getTool() == tool
         }
+    }
 
     return JToolBar().apply {
         isFloatable = false

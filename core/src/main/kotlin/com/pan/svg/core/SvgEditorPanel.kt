@@ -54,8 +54,9 @@ import javax.swing.Timer
  *  - click to select, LeaferJS-style accent frame with round handles + rotate grip
  *  - drag body = move, drag handle = resize, drag rotate grip = rotate (with snapping);
  *    click empty space in MOVE mode deselects (no implicit rubber band)
- *  - MARQUEE tool: press anywhere → rubber band; a drag selects the topmost element inside
- *    the band, a click selects the exact element under the pointer
+ *  - MARQUEE tool: press anywhere → rubber band; a drag box-selects every element the band
+ *    intersects (moved as a group, topmost is the primary), a click without a drag selects the
+ *    exact element under the pointer
  *  - hit tests are path-exact via the sidecar (equivalent to LeaferJS offscreen colour
  *    picking): a pointer only targets an element whose filled/stroked geometry it touches
  *  - space / middle-mouse pans the scroll viewport, wheel zooms around the cursor
@@ -255,7 +256,7 @@ class SvgEditorPanel(
 
         // --- Image-pixel grid ---
         private const val GRID_SPAN = 10 // image px between grid lines
-        private const val GRID_ZOOM_MIN = 1.0 // show grid only at >=100%
+        private const val MIN_GRID_PX = 3 // smallest on-screen spacing before the pitch doubles
     }
 
     init {
@@ -583,8 +584,9 @@ class SvgEditorPanel(
      *  - [Tool.MOVE]: press/drag an element to select + move it, drag its handles to resize /
      *    rotate, click empty space to deselect. This is the default.
      *  - [Tool.MARQUEE]: pressing ANYWHERE (on or off an element) starts a rubber-band box;
-     *    on release the topmost element inside the band is selected, and a plain click without
-     *    dragging selects the exact element under the pointer. Element dragging is disabled.
+     *    a drag box-selects every element the band intersects (group drag), a plain click
+     *    without dragging selects the exact element under the pointer. Element dragging via the
+     *    rubber band is disabled; selected elements move as a group under the MOVE tool.
      */
     fun setTool(t: Tool) {
         if (tool == t) return
@@ -1477,10 +1479,25 @@ class SvgEditorPanel(
         // empty space in MOVE mode is a plain click-to-deselect (the first click of a "box
         // select" only exists under the MARQUEE tool).
         val hit = hitTestAt(ix, iy)
-        if (hit == null && !nearSelectionHandles(x, y)) {
+        // A path-exact hit test misses the element's own hollow/concave regions (a ring's
+        // centre hole, a gear tooth gap, the transparent box of a stroke-only icon). Pressing
+        // inside the SELECTED element's bounding box must still grab it — otherwise a user who
+        // double-clicked a ring then presses its (empty) centre to drag loses the selection and
+        // nothing moves. Match that by treating a miss inside the current selection's box as a
+        // press on the selection itself.
+        val selectedBoxHit =
+            hit == null &&
+                selectedId?.let { sid -> engine.layout.byId(sid)?.contains(ix, iy) } == true
+        if (hit == null && !selectedBoxHit && !nearSelectionHandles(x, y)) {
             clearSelection()
             canvas.repaint()
             return
+        }
+        if (hit == null && selectedBoxHit) {
+            // Re-target the controller at the currently selected element so onMousePressed
+            // enters MOVE on it (its box contains the pointer) instead of falling through to
+            // deselect. The selection itself is unchanged.
+            selectedId?.let { sid -> engine.layout.byId(sid)?.let { fresh -> interaction.selected = fresh } }
         }
         interaction.onMousePressed(engine.layout, ix, iy, tol)
         val newSel = interaction.selected?.id
@@ -1561,22 +1578,30 @@ class SvgEditorPanel(
         val sy = (r.y - offsetY) / viewScale
         val sw = r.width / viewScale
         val sh = r.height / viewScale
-        // Multi-select: every element whose bounding box is FULLY inside the band becomes
-        // selected and moves as a group. `contained` (rather than "intersect") naturally
-        // excludes a full-canvas background rect and any element the box is merely touching.
-        val contained =
+        // Box-select: every element whose bounding box INTERSECTS the band becomes selected and
+        // moves as a group. (Intersection — not "fully contained" — is what makes a band over a
+        // large compound icon like a gear actually select it: its outer silhouette bbox usually
+        // sticks out past the drag rectangle on every side, so "contained" would only ever pick
+        // small interior leaves, which reads as "box select does nothing".) Transparent usvg
+        // group wrappers are excluded by the blank-id filter, and a rect that backdrops the
+        // ENTIRE document (a common `<rect>` page background) never joins a marquee — dragging a
+        // box over content must not silently start moving the page background with it.
+        val w = engine.layout.width
+        val h = engine.layout.height
+        val hit =
             engine.layout.elements.filter { el ->
                 el.id.isNotBlank() &&
-                    el.x >= sx &&
-                    el.y >= sy &&
-                    el.right <= sx + sw &&
-                    el.bottom <= sy + sh
+                    el.x < sx + sw &&
+                    el.right > sx &&
+                    el.y < sy + sh &&
+                    el.bottom > sy &&
+                    !(el.x <= 0.0 && el.y <= 0.0 && el.right >= w - 0.5 && el.bottom >= h - 0.5)
             }
-        val primary = contained.maxByOrNull { it.index }?.id
+        val primary = hit.maxByOrNull { it.index }?.id
         if (primary != null) {
             interaction.selected = engine.layout.byId(primary)
-            if (interaction.selected == null) interaction.selected = contained.last()
-            setSelection(contained.map { it.id }, primary)
+            if (interaction.selected == null) interaction.selected = hit.last()
+            setSelection(hit.map { it.id }, primary)
         } else {
             clearSelection()
         }
@@ -1821,6 +1846,15 @@ class SvgEditorPanel(
         recomputeView()
     }
 
+    /** Test hook: current pan offset (panel px). */
+    fun debugOffsetX(): Double = offsetX
+
+    /** Test hook: current pan offset (panel px). */
+    fun debugOffsetY(): Double = offsetY
+
+    /** Test hook: current view scale (panel px per SVG unit). */
+    fun debugViewScale(): Double = viewScale
+
     /** Test hook: replace the selection with `ids` (last member becomes primary). */
     fun debugSetSelection(ids: List<String>) {
         if (ids.isEmpty()) {
@@ -2055,17 +2089,19 @@ class SvgEditorPanel(
     }
 
     /**
-     * IDEA-aligned image-pixel grid: a line every [GRID_SPAN] image (SVG) pixels, drawn only
-     * when zoomed in enough that 1 image px >= 1 screen px ([GRID_ZOOM_MIN]). Lines are scoped
-     * to the image bounds.
+     * Grid drawn over the document when toggled on. The line pitch is the image (SVG) pixel
+     * pitch [GRID_SPAN] scaled to screen, but at low zoom (a large doc fit into a small viewport)
+     * that would collapse to sub-pixel lines — so the pitch is multiplied by the smallest power of
+     * two that keeps the on-screen spacing readable. The toggle therefore always has a visible
+     * effect, at any zoom level.
      */
     private fun drawGrid(g: Graphics2D) {
         val w = engine.layout.width
         val h = engine.layout.height
         if (w <= 0 || h <= 0) return
-        if (viewScale < GRID_ZOOM_MIN) return
-        val step = GRID_SPAN * viewScale
-        if (step < 3) return
+        var span = GRID_SPAN
+        while (span * viewScale < MIN_GRID_PX) span *= 2
+        val step = span * viewScale
         val bg = background
         val lum = 0.299 * bg.red + 0.587 * bg.green + 0.114 * bg.blue
         g.color = if (lum > 140) Color(0xE2, 0xE2, 0xE8) else Color(0x2C, 0x2C, 0x34)

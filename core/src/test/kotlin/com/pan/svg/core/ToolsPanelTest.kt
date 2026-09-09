@@ -1,10 +1,15 @@
 package com.pan.svg.core
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.awt.Color
 import java.awt.Point
+import java.awt.image.BufferedImage
+import javax.swing.Icon
+import javax.swing.JPanel
 
 /**
  * Strict separation of the two interaction tools on [SvgEditorPanel]:
@@ -84,5 +89,47 @@ class ToolsPanelTest {
         assertNull(panel.selectedElementId)
         assertEquals(before, panel.svgSource)
         panel.dispose()
+    }
+
+    /**
+     * Renders [icon] onto a (theme-simulating) background and returns the set of painted pixels.
+     * `paintIcon` picks its ink from the target component's background luminance — pass an
+     * opaque panel so the theme is fully deterministic, both light and dark.
+     */
+    private fun paintedPixels(
+        icon: Icon,
+        dark: Boolean,
+    ): Set<Long> {
+        val bg = if (dark) Color(0x2B, 0x2B, 0x2B) else Color.WHITE
+        val target = JPanel().apply {
+            isOpaque = true
+            background = bg
+        }
+        val img = BufferedImage(icon.iconWidth, icon.iconHeight, BufferedImage.TYPE_INT_ARGB)
+        val g = img.createGraphics()
+        g.color = bg
+        g.fillRect(0, 0, img.width, img.height)
+        icon.paintIcon(target, g, 0, 0)
+        g.dispose()
+        val painted = HashSet<Long>()
+        for (y in 0 until img.height) {
+            for (x in 0 until img.width) {
+                if ((img.getRGB(x, y) and 0x00FF_FFFF) != (bg.rgb and 0x00FF_FFFF)) {
+                    painted.add((x.toLong() shl 32) or y.toLong())
+                }
+            }
+        }
+        return painted
+    }
+
+    @Test
+    fun `Move and Box Select tool icons are visible and distinct on both themes`() {
+        for (dark in listOf(false, true)) {
+            val move = paintedPixels(EditorIcons.moveTool(), dark)
+            val box = paintedPixels(EditorIcons.boxSelectTool(), dark)
+            assertTrue(move.isNotEmpty(), "Move icon must be visible on ${if (dark) "dark" else "light"} bg")
+            assertTrue(box.isNotEmpty(), "Box Select icon must be visible on ${if (dark) "dark" else "light"} bg")
+            assertNotEquals(move, box, "the two tool icons must look different")
+        }
     }
 }

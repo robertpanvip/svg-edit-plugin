@@ -1,8 +1,9 @@
 package com.pan.svg.core
 
 import org.junit.jupiter.api.Assertions.assertTrue
-import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Assumptions
+import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.TestInstance
 import java.nio.file.Files
 import java.nio.file.Path
