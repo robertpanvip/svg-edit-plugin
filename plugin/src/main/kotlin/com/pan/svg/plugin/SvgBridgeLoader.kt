@@ -6,7 +6,6 @@ import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.diagnostic.Logger
 import java.io.File
 import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.util.zip.ZipFile
 
 /**
@@ -161,33 +160,63 @@ object SvgBridgeLoader {
     /** Multi-line description of the attempts made by the last [loadOrNull] call. */
     fun describeAttempts(): String = synchronized(lock) { attempts.joinToString("\n") }
 
-    /** Extract `/<platform-lib-name>` from the classpath to a temp file; returns its absolute path. */
+    /**
+     * Materialise the bundled `/<platform-lib-name>` to a stable path and return its absolute
+     * path.
+     *
+     * The file is written to `<config>/svg-editor/native/` (the same directory that caches JNA's
+     * `jnidispatch`) instead of a fresh temp file on every process start. A newly-extracted
+     * library in the OS temp dir is re-scanned by security/AV software on every IDE restart,
+     * which is exactly the multi-second freeze the user sees each cold start; a stable file is
+     * only written when its content actually changed (e.g. a plugin update), so restarts become a
+     * cheap existence + byte-compare check. When the config dir is not writable it falls back to
+     * a temp file so loading still works.
+     */
     private fun extractBundled(): String? {
         val name = nativeLibName()
-        val resource = SvgBridgeLoader::class.java.getResourceAsStream("/$name") ?: return null
+        val bytes =
+            SvgBridgeLoader::class.java.getResourceAsStream("/$name")?.use { it.readBytes() }
+                ?: return null
+        val dir = configDir().resolve("native")
+        val stable = dir.resolve(name)
         return try {
-            val ext = name.substringAfterLast('.', "")
-            val suffix = if (ext.isEmpty()) "" else ".$ext"
-            val tmp = Files.createTempFile("resvg_bridge-", suffix).toFile()
-            tmp.deleteOnExit()
-            resource.use { input ->
-                Files.copy(input, tmp.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            if (stable.isFile && stable.length() == bytes.size.toLong() && stable.readBytes().contentEquals(bytes)) {
+                LOG.info("bridge: reused cached bundled $name at ${stable.absolutePath} (${bytes.size} bytes)")
+            } else {
+                dir.mkdirs()
+                stable.writeBytes(bytes)
+                LOG.info("bridge: extracted bundled $name -> ${stable.absolutePath} (${bytes.size} bytes)")
             }
-            LOG.info("bridge: extracted bundled $name -> ${tmp.absolutePath} (${tmp.length()} bytes)")
-            // Make the temp dir discoverable by the OS loader / JNA in case the dll has
-            // sibling dependencies.
-            val parent = tmp.parent
-            val existing = System.getProperty("jna.library.path", "")
-            if (parent !in existing.split(File.pathSeparator)) {
-                System.setProperty(
-                    "jna.library.path",
-                    if (existing.isEmpty()) parent else "$existing${File.pathSeparator}$parent",
-                )
-            }
-            tmp.absolutePath
+            addLibraryPath(dir)
+            stable.absolutePath
         } catch (t: Throwable) {
-            record("bundled (jar) extract", false, t)
-            null
+            record("bundled (jar) extract to config dir", false, t)
+            // Config dir unwritable (rare): fall back to a per-process temp copy.
+            try {
+                val ext = name.substringAfterLast('.', "")
+                val suffix = if (ext.isEmpty()) "" else ".$ext"
+                val tmp = Files.createTempFile("resvg_bridge-", suffix).toFile()
+                tmp.deleteOnExit()
+                tmp.writeBytes(bytes)
+                addLibraryPath(File(tmp.parent))
+                LOG.info("bridge: extracted bundled $name -> ${tmp.absolutePath} (${bytes.size} bytes)")
+                tmp.absolutePath
+            } catch (t2: Throwable) {
+                record("bundled (jar) extract", false, t2)
+                null
+            }
+        }
+    }
+
+    /** Make [dir] discoverable by the OS loader / JNA in case the library has sibling deps. */
+    private fun addLibraryPath(dir: File) {
+        val path = dir.absolutePath
+        val existing = System.getProperty("jna.library.path", "")
+        if (path !in existing.split(File.pathSeparator)) {
+            System.setProperty(
+                "jna.library.path",
+                if (existing.isEmpty()) path else "$existing${File.pathSeparator}$path",
+            )
         }
     }
 
