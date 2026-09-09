@@ -41,8 +41,9 @@ import javax.swing.Timer
  *  2. A [RenderScheduler] (latest-wins, CONTENT beats LAYERS) feeds results back on the EDT,
  *     guarded by staleness tags (a reference to the exact `svgSource` string + device size),
  *     so a slow render for an outdated view is never painted.
- *  3. Wheel zoom / window resize only resample the existing bitmap for instant feedback;
- *     a 160 ms debounce timer then re-renders once at the new device resolution.
+ *  3. Wheel zoom / window resize resample the existing bitmap for instant feedback; wheel zoom
+ *     additionally re-submits a crisp frame at every step (latest-wins), while a resize still
+ *     debounces into a single re-render once it settles.
  *  4. Hovering an element pre-heats its drag layers (background / foreground) after 120 ms,
  *     so the first drag frame is already warm — press-and-drag never blocks. Hover draws
  *     nothing (only the cursor changes); the selection frame appears after a click.
@@ -1268,9 +1269,12 @@ class SvgEditorPanel(
                 vpPreview = VpPreview(src, at)
             }
         }
-        // Instant feedback: the existing bitmap is resampled by drawScaled. One crisp
-        // re-render follows once the wheel/resize burst settles.
-        if (scheduler != null) crispTimer?.restart() else renderAtDeviceSize()
+        // Instant feedback: the existing bitmap is resampled by drawScaled while a crisp frame
+        // for the NEW view is rendered immediately. No 160ms debounce during wheel zoom: every
+        // notch re-submits at the latest parameters and the render scheduler is latest-wins, so
+        // older in-flight frames are dropped instead of queueing — the content stops looking
+        // "one frame behind" (old-size picture until the burst settles).
+        renderAtDeviceSize()
         canvas.repaint()
         emitStatus()
     }
