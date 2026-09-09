@@ -124,6 +124,14 @@ class SvgEditorPanel(
     private var layerViewScale = -1.0
     private var layerDpi = -1.0
 
+    /**
+     * Keys of the members the cached [bgImage]/[fgImage] were produced for when they cover a
+     * whole multi-selection (group drag): the background hides EVERY member and the ghost keeps
+     * all of them, so the whole group previews moving together. Null = the layers belong to the
+     * single [layerId] element only.
+     */
+    private var layerGroup: List<String>? = null
+
     /** True when the cached drag layers were rendered for the current view scale × dpr. */
     private fun layersCurrent(): Boolean = layerViewScale == viewScale && layerDpi == dpiScale
 
@@ -804,7 +812,15 @@ class SvgEditorPanel(
         // Pre-heating the selection's drag layers is wasted raster churn while a zoom burst is
         // re-submitting the content frame on every notch — the zoomed frame would invalidate
         // them instantly. Defer until the wheel settles (crispTimer re-requests them).
-        if (!zoomBurst) selectedId?.let { requestLayers(it) }
+        if (!zoomBurst) {
+            // A group drag must keep its whole-selection pair even when the view re-renders
+            // (resize/zoom mid-drag): re-warm the GROUP layers, not just the primary's.
+            if (groupDrag && selectedIds.size > 1) {
+                requestGroupLayers()
+            } else {
+                selectedId?.let { requestLayers(it) }
+            }
+        }
         staticDirty = true
     }
 
@@ -999,6 +1015,10 @@ class SvgEditorPanel(
      * both renders share ONE background job so they always arrive as a consistent pair.
      */
     private fun requestLayers(id: String) {
+        // Switching from group layers (one pair covering a whole multi-selection) back to the
+        // single-element pair: drop the group pair first, or it could be matched as a stale
+        // single pair while the fresh single pair is still rendering.
+        if (layerGroup != null) clearLayers()
         val sc = sidecar
         if (sc != null && sidecarActive) {
             requestLayersSidecar(sc, id)
@@ -1033,6 +1053,7 @@ class SvgEditorPanel(
                 tt.dpr == dpiScale
             ) {
                 layerId = tt.id
+                layerGroup = null
                 layerViewScale = tt.viewScale
                 layerDpi = tt.dpr
                 bgImage = result.first
@@ -1078,11 +1099,76 @@ class SvgEditorPanel(
                 tag.dpr == dpiScale
             ) {
                 layerId = id
+                layerGroup = null
                 layerViewScale = tag.viewScale
                 layerDpi = tag.dpr
                 bgImage = result.background
                 fgImage = result.ghost
                 buildFgCrop()
+                staticDirty = true
+                canvas.repaint()
+            } else if (result == null) {
+                lastRenderError?.let { onRenderError?.invoke(it) }
+            }
+        }
+        if (scheduler == null) {
+            apply(task())
+            return
+        }
+        scheduler.submit(RenderScheduler.Slot.LAYERS, tag, task) { result, _ -> apply(result) }
+    }
+
+    /**
+     * Group drag layers: one startDragGroup round-trip returns a background with EVERY selected
+     * member's subtree hidden plus a single ghost containing all of them (ancestor groups
+     * preserved). Cropping the ghost to the members' union box and blitting it translated by the
+     * group's drag delta previews the whole selection moving together. Falls back to the
+     * single-element layers when the sidecar can't represent the set (non-sidecar/legacy path).
+     */
+    private fun requestGroupLayers() {
+        val sc = sidecar
+        val primary = selectedId ?: return
+        if (sc == null || !sidecarActive) {
+            requestLayers(primary)
+            return
+        }
+        val ids = selectedIds.toList()
+        val els = ids.mapNotNull { engine.layout.byId(it) }
+        val nodeIds = els.map { it.nodeId }
+        if (ids.size < 2 || els.size != ids.size || nodeIds.any { it == 0L }) {
+            requestLayers(primary)
+            return
+        }
+        val w = engine.layout.width
+        val h = engine.layout.height
+        if (w <= 0.0 || h <= 0.0) return
+        val tag = LayerTag(engine.svgSource, primary, devicePx(w), devicePx(h), viewScale, dpiScale)
+        wantedLayer = tag
+        val dpr = dpiScale
+        val groupSnapshot = ids // the exact set this pair will cover
+        val task = {
+            try {
+                sc.startDragGroup(nodeIds, tag.w, tag.h, viewScale * dpr, 0.0, 0.0)
+            } catch (t: Throwable) {
+                lastRenderError = t
+                null
+            }
+        }
+        val apply: (SidecarDragImages?) -> Unit = { result ->
+            if (
+                result != null &&
+                wantedLayer === tag &&
+                tag.svg === engine.svgSource &&
+                tag.viewScale == viewScale &&
+                tag.dpr == dpiScale
+            ) {
+                layerId = primary
+                layerGroup = groupSnapshot
+                layerViewScale = tag.viewScale
+                layerDpi = tag.dpr
+                bgImage = result.background
+                fgImage = result.ghost
+                buildGroupCrop()
                 staticDirty = true
                 canvas.repaint()
             } else if (result == null) {
@@ -1105,6 +1191,7 @@ class SvgEditorPanel(
         val bg = renderer.renderRgba(SvgUtils.hideElement(engine.svgSource, id), rw, rh)
         val fg = renderer.renderRgba(SvgUtils.soloElement(engine.svgSource, id), rw, rh)
         layerId = id
+        layerGroup = null
         layerViewScale = viewScale
         layerDpi = dpiScale
         bgImage = RgbaImages.fromRgba(bg.rgba, bg.width, bg.height)
@@ -1145,6 +1232,49 @@ class SvgEditorPanel(
         fgCropY = cy0
     }
 
+    /**
+     * Crop the group ghost down to the union bounding box of every [layerGroup] member (plus the
+     * same generous padding as [buildFgCrop], so no stroke or antialiasing is ever clipped). The
+     * group moves as a rigid unit — members never change their relative offsets — so the whole
+     * union crop is blitted at the primary member's drag delta in [drawGroupFg].
+     */
+    private fun buildGroupCrop() {
+        val fg = fgImage ?: run { fgCrop = null; return }
+        val g = layerGroup ?: run { fgCrop = null; return }
+        val els = g.mapNotNull { engine.layout.byId(it) }
+        if (els.isEmpty()) {
+            fgCrop = null
+            return
+        }
+        val dpr = dpiScale
+        val minX = els.minOf { it.x }
+        val minY = els.minOf { it.y }
+        val maxX = els.maxOf { it.right }
+        val maxY = els.maxOf { it.bottom }
+        val sx0 = minX * viewScale * dpr
+        val sy0 = minY * viewScale * dpr
+        val sw0 = (maxX - minX) * viewScale * dpr
+        val sh0 = (maxY - minY) * viewScale * dpr
+        if (sw0 <= 0.0 || sh0 <= 0.0) {
+            fgCrop = null
+            return
+        }
+        val padPx = kotlin.math.max(sw0, sh0)
+        val cx0 = (sx0 - padPx).coerceAtLeast(0.0)
+        val cy0 = (sy0 - padPx).coerceAtLeast(0.0)
+        val right = (sx0 + sw0 + padPx).coerceAtMost(fg.width.toDouble())
+        val bottom = (sy0 + sh0 + padPx).coerceAtMost(fg.height.toDouble())
+        val cw0 = right - cx0
+        val ch0 = bottom - cy0
+        if (cw0 < 1 || ch0 < 1) {
+            fgCrop = null
+            return
+        }
+        fgCrop = fg.getSubimage(cx0.toInt(), cy0.toInt(), cw0.toInt(), ch0.toInt())
+        fgCropX = cx0
+        fgCropY = cy0
+    }
+
     private fun clearLayers() {
         wantedLayer = null
         scheduler?.cancel(RenderScheduler.Slot.LAYERS)
@@ -1152,8 +1282,22 @@ class SvgEditorPanel(
         fgImage = null
         fgCrop = null
         layerId = null
+        layerGroup = null
         layerViewScale = -1.0
         layerDpi = -1.0
+    }
+
+    /**
+     * Whether the cached drag layers cover the current selection: a single-element pair must
+     * belong to the selected element, a group pair must cover exactly the whole selection.
+     */
+    private fun layersMatchSelection(): Boolean {
+        val g = layerGroup
+        if (g != null) {
+            if (layerId == null || selectedIds.size != g.size) return false
+            return g.all { it in selectedIds }
+        }
+        return layerId != null && layerId == selectedId
     }
 
     /**
@@ -1675,8 +1819,15 @@ class SvgEditorPanel(
             // whole set and make this element the moving primary — a group drag moves them all
             // together. A single selection falls through to the normal (idempotent) path.
             selectedId = newSel
-            groupDrag = true
-            if (layerId != newSel) requestLayers(newSel)
+            // Only a body MOVE drags the set as a group; grabbing the primary's resize/rotate
+            // handle edits that one element and must keep the single-element drag layers.
+            val groupMove = interaction.editMode == InteractionController.EditMode.MOVE
+            groupDrag = groupMove
+            if (groupMove) {
+                requestGroupLayers()
+            } else if (layerId != newSel) {
+                requestLayers(newSel)
+            }
             staticDirty = true
             canvas.repaint()
             return
@@ -2104,10 +2255,9 @@ class SvgEditorPanel(
         val manipulationActive =
             interaction.previewBox != null || interaction.previewAngle != 0.0
         val layersReady =
-            layerId != null &&
-                layerId == selectedId &&
-                bgImage != null &&
+            bgImage != null &&
                 fgImage != null &&
+                layersMatchSelection() &&
                 layersCurrent()
         val useLayers = layersReady && manipulationActive
         if (useLayers) {
@@ -2117,7 +2267,9 @@ class SvgEditorPanel(
             }
             staticLayer?.let { g.drawImage(it, 0, 0, null) }
                 ?: run { g.color = background; g.fillRect(0, 0, width, height) }
-            if (fgCrop != null) drawFg(g)
+            if (fgCrop != null) {
+                if (layerGroup != null) drawGroupFg(g) else drawFg(g)
+            }
         } else {
             // Idle path: draw the full render directly. Skipping the intermediate static layer
             // avoids Java2D colour-management conversions that can shift exact pixel values and
@@ -2268,6 +2420,33 @@ class SvgEditorPanel(
         g.clip = oldClip
     }
 
+    /**
+     * Blit the group ghost ([fgCrop], the union crop of all selected members) at the live group
+     * delta. A group drag is a pure translation: every member keeps its committed offset
+     * relative to the primary, so the whole union crop shifts by exactly the primary's preview
+     * delta and all members visibly move together at full fps.
+     */
+    private fun drawGroupFg(g: Graphics2D) {
+        val crop = fgCrop ?: return
+        val primaryId = selectedId ?: return
+        val primary = engine.layout.byId(primaryId) ?: return
+        val pb = interaction.previewBox ?: return
+        val dxSvg = pb.x - primary.x
+        val dySvg = pb.y - primary.y
+        val dpr = dpiScale
+        // The crop is a device-resolution raster whose top-left sits at fgCropX/Y device px
+        // inside the full-canvas ghost. Drawing it at its natural position (delta 0) realigns
+        // with the background; shifting by the drag delta moves the whole group live.
+        val gx = offsetX + dxSvg * viewScale + fgCropX / dpr
+        val gy = offsetY + dySvg * viewScale + fgCropY / dpr
+        val oldClip = g.clip
+        val vbW = (engine.layout.width * viewScale).toInt().coerceAtLeast(1)
+        val vbH = (engine.layout.height * viewScale).toInt().coerceAtLeast(1)
+        g.clipRect(offsetX.toInt(), offsetY.toInt(), vbW, vbH)
+        drawScaledAt(g, crop, gx, gy)
+        g.clip = oldClip
+    }
+
     /** Fill the panel background; paint the IDEA-style transparency chessboard when enabled. */
     private fun paintBackground(g: Graphics2D) {
         g.color = background
@@ -2351,21 +2530,39 @@ class SvgEditorPanel(
      * (marquee box-select) visibly marks ALL members instead of hiding all but the primary. The
      * primary member additionally carries the 8 control handles and the rotate lever.
      *
-     * Only the primary's box tracks the live (snapped) preview during a manipulation; the other
-     * members sit on their resting geometry until the group edit commits.
+     * Only the primary's box tracks the live (snapped) preview during a manipulation; during a
+     * group move the other members' outlines follow the same delta so the overlay and the moving
+     * ghost stay aligned (members keep their relative offsets).
      */
     private fun drawSelection(g: Graphics2D) {
         if (selectedIds.isEmpty()) return
         val primaryId = selectedId
+        // Live translation of a group move, in canvas units (null outside a group MOVE preview).
+        val groupDelta: Pair<Double, Double>? =
+            if (groupDrag && selectedIds.size > 1 && interaction.previewBox != null) {
+                primaryId?.let { pid ->
+                    engine.layout.byId(pid)?.let { pri ->
+                        val pb = interaction.previewBox!!
+                        (pb.x - pri.x) to (pb.y - pri.y)
+                    }
+                }
+            } else {
+                null
+            }
         for (id in selectedIds.toList()) {
             val el = engine.layout.byId(id) ?: continue
             val isPrimary = id == primaryId
+            val committed = InteractionController.Box(el.x, el.y, el.width, el.height)
             val box =
                 if (isPrimary) {
-                    interaction.previewBox
-                        ?: InteractionController.Box(el.x, el.y, el.width, el.height)
+                    interaction.previewBox ?: committed
                 } else {
-                    InteractionController.Box(el.x, el.y, el.width, el.height)
+                    val d = groupDelta
+                    if (d != null) {
+                        InteractionController.Box(el.x + d.first, el.y + d.second, el.width, el.height)
+                    } else {
+                        committed
+                    }
                 }
             val rad = if (isPrimary) Math.toRadians(interaction.previewAngle) else 0.0
             val bcx = offsetX + (box.x + box.w / 2) * viewScale

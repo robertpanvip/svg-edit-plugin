@@ -460,6 +460,47 @@ impl Session {
         })
     }
 
+    /// Group variant of [Self::start_drag]: the background hides EVERY selected
+    /// member's subtree and the single ghost keeps all of them (plus their shared
+    /// ancestor groups), so a multi-selection drag previews as one unit that the
+    /// Kotlin side translates — members keep their relative positions for free.
+    pub fn start_drag_group(
+        &self,
+        node_ids: &[usize],
+        vw: u32,
+        vh: u32,
+        scale: f64,
+        tx: f64,
+        ty: f64,
+    ) -> Result<DragImages, String> {
+        let mut idxs = Vec::with_capacity(node_ids.len());
+        for &id in node_ids {
+            let idx = self
+                .doc
+                .find_by_node_id(id)
+                .ok_or_else(|| format!("unknown nodeId {id}"))?;
+            idxs.push(idx);
+        }
+        // Mode::Hide/HideMany key on the element's DOM node id (the same ids the Kotlin side
+        // passes), while Mode::Solo keys on arena indices (path_to returns indices) — keep the
+        // two in their respective spaces.
+        let marked: HashSet<usize> = node_ids.iter().copied().collect();
+        let bg_svg = self.doc.serialize(&Mode::HideMany(marked));
+        let mut chain: HashSet<usize> = HashSet::new();
+        for &idx in &idxs {
+            chain.extend(self.doc.path_to(idx));
+        }
+        let ghost_svg = self.doc.serialize(&Mode::Solo(chain));
+        let bg_png = render_svg_str(&bg_svg, vw, vh, scale, tx, ty)?;
+        let ghost_png = render_svg_str(&ghost_svg, vw, vh, scale, tx, ty)?;
+        Ok(DragImages {
+            bg_png,
+            ghost_png,
+            w: vw.clamp(1, MAX_PX),
+            h: vh.clamp(1, MAX_PX),
+        })
+    }
+
     /// Commits a finished drag: `m` is the accumulated root-space delta matrix.
     /// The transform lands on the element as `T_new = A^-1 * M * A * T_old`
     /// so it stays local and composes with pre-existing transforms.
@@ -648,6 +689,21 @@ mod tests {
         assert_eq!(&d.bg_png[..4], b"\x89PNG");
         assert_eq!(&d.ghost_png[..4], b"\x89PNG");
         assert_ne!(d.bg_png, d.ghost_png);
+    }
+
+    #[test]
+    fn start_drag_group_hides_all_members_and_ghosts_the_union() {
+        let s = Session::new(SAMPLE).unwrap();
+        let g = s.start_drag_group(&[3, 6], 400, 240, 2.0, 0.0, 0.0).unwrap();
+        assert_eq!(g.w, 400);
+        assert_eq!(&g.bg_png[..4], b"\x89PNG");
+        assert_eq!(&g.ghost_png[..4], b"\x89PNG");
+        // The group background hides BOTH members, so it must differ from a single-member
+        // background (which still shows the other member)…
+        let single = s.start_drag(3, 400, 240, 2.0, 0.0, 0.0).unwrap();
+        assert_ne!(g.bg_png, single.bg_png);
+        // …and the group ghost must cover more than the single member's ghost.
+        assert_ne!(g.ghost_png, single.ghost_png);
     }
 
     #[test]

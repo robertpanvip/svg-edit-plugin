@@ -54,6 +54,7 @@ open class FakeSidecar : SidecarClient(listOf("fake-sidecar")) {
                 )
             "hitTest" -> hitNodeId?.let { linkedMapOf("nodeId" to it) } ?: emptyMap<Any?, Any?>()
             "startDrag" -> linkedMapOf("bgPng" to pngB64, "ghostPng" to pngB64, "w" to 200, "h" to 120)
+            "startDragGroup" -> linkedMapOf("bgPng" to pngB64, "ghostPng" to pngB64, "w" to 200, "h" to 120)
             "commit" ->
                 linkedMapOf(
                     "svg" to commitSvg,

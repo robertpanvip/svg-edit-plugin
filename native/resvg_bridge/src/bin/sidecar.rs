@@ -16,6 +16,9 @@
 //! - `startDrag` `{nodeId,vw,vh,scale,tx,ty}` →
 //!   `{bgPng,ghostPng,w,h}` — two base64 PNGs, rendered once; during the drag
 //!   the Kotlin side only moves the ghost locally, no further RPC.
+//! - `startDragGroup` `{nodeIds:[...],vw,vh,scale,tx,ty}` → same shape, but the
+//!   background hides EVERY listed member and the ghost keeps all of them, so a
+//!   multi-selection drag previews as one unit (all members move together).
 //! - `commit` `{nodeId,matrix,vw,vh,scale,tx,ty}` →
 //!   `{svg,png,w,h,elements}` — `matrix` is the accumulated root-space drag
 //!   delta in SVG `matrix(a,b,c,d,e,f)` order; the landed `transform` is
@@ -119,6 +122,19 @@ fn dispatch(session: &mut Option<Session>, method: &str, p: &Value) -> Result<Va
                 "h": d.h,
             }))
         }
+        "startDragGroup" => {
+            let s = session.as_ref().ok_or("no document open")?;
+            let node_ids = node_ids(p)?;
+            let (vw, vh) = dims(p);
+            let (scale, tx, ty) = view(p);
+            let d = s.start_drag_group(&node_ids, vw, vh, scale, tx, ty)?;
+            Ok(json!({
+                "bgPng": base64_png(&d.bg_png),
+                "ghostPng": base64_png(&d.ghost_png),
+                "w": d.w,
+                "h": d.h,
+            }))
+        }
         "commit" => {
             let s = session.as_mut().ok_or("no document open")?;
             let node_id = node_id(p)?;
@@ -155,6 +171,23 @@ fn node_id(p: &Value) -> Result<usize, String> {
         .and_then(Value::as_u64)
         .map(|v| v as usize)
         .ok_or_else(|| "missing nodeId".to_string())
+}
+
+fn node_ids(p: &Value) -> Result<Vec<usize>, String> {
+    let arr = p
+        .get("nodeIds")
+        .and_then(Value::as_array)
+        .ok_or("missing nodeIds")?;
+    if arr.is_empty() {
+        return Err("nodeIds must not be empty".to_string());
+    }
+    arr.iter()
+        .map(|v| {
+            v.as_u64()
+                .map(|n| n as usize)
+                .ok_or_else(|| "nodeIds entries must be numbers".to_string())
+        })
+        .collect()
 }
 
 fn dims(p: &Value) -> (u32, u32) {

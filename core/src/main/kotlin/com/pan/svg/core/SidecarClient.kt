@@ -151,6 +151,40 @@ open class SidecarClient(private val command: List<String>) : AutoCloseable {
         )
     }
 
+    /**
+     * Group drag layers: the background hides EVERY listed member's subtree and the single
+     * ghost keeps all of them (with their ancestor groups), so a multi-selection drag can
+     * preview as one unit that moves together.
+     */
+    fun startDragGroup(
+        nodeIds: List<Long>,
+        vw: Int,
+        vh: Int,
+        scale: Double,
+        tx: Double,
+        ty: Double,
+    ): SidecarDragImages {
+        val res =
+            reply(
+                request(
+                    "startDragGroup",
+                    linkedMapOf(
+                        "nodeIds" to nodeIds, "vw" to vw, "vh" to vh,
+                        "scale" to scale, "tx" to tx, "ty" to ty,
+                    ),
+                ),
+                "startDragGroup",
+            )
+        val bg = res["bgPng"] as? String ?: throw SidecarException("startDragGroup reply missing bgPng")
+        val ghost = res["ghostPng"] as? String ?: throw SidecarException("startDragGroup reply missing ghostPng")
+        return SidecarDragImages(
+            background = decodePng(bg),
+            ghost = decodePng(ghost),
+            width = (res["w"] as? Number)?.toInt() ?: 0,
+            height = (res["h"] as? Number)?.toInt() ?: 0,
+        )
+    }
+
     fun commit(
         nodeId: Long,
         matrix: List<Double>,

@@ -93,6 +93,9 @@ pub enum Mode {
     InjectIds,
     /// Skip the subtree rooted at the given node id.
     Hide(usize),
+    /// Skip every subtree rooted at one of the given node ids (a group drag
+    /// hides all its members from the background layer at once).
+    HideMany(HashSet<usize>),
     /// Keep only the given chain of arena indices (root + ancestors + node).
     Solo(HashSet<usize>),
 }
@@ -311,6 +314,7 @@ impl Document {
                     Mode::Full => false,
                     Mode::InjectIds => true,
                     Mode::Hide(h) => el.node_id == *h,
+                    Mode::HideMany(set) => set.contains(&el.node_id),
                     Mode::Solo(set) => !set.contains(&idx),
                 };
                 blocked[idx] = own || el.dirty || el.children.iter().any(|&c| blocked[c]);
@@ -330,6 +334,11 @@ impl Document {
                 }
                 if let Mode::Hide(h) = mode {
                     if el.node_id == *h {
+                        return;
+                    }
+                }
+                if let Mode::HideMany(set) = mode {
+                    if set.contains(&el.node_id) {
                         return;
                     }
                 }
@@ -676,6 +685,33 @@ mod tests {
         assert!(!out.contains("<circle"));
         assert!(out.contains("id='box-a'"));
         assert!(out.contains("<!-- drawn by hand -->"));
+    }
+
+    #[test]
+    fn hide_many_removes_every_marked_subtree() {
+        let doc = Document::parse(SAMPLE);
+        let set: HashSet<usize> = [3, 6].into_iter().collect(); // box-a + dot
+        let out = doc.serialize(&Mode::HideMany(set));
+        assert!(!out.contains("id='box-a'"));
+        assert!(!out.contains("<circle"));
+        assert!(out.contains("id='bg'"));
+        assert!(out.contains("<text"));
+        assert!(out.contains("<!-- drawn by hand -->"));
+    }
+
+    #[test]
+    fn hide_many_matches_plain_document_order_ids() {
+        let src = concat!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"400\" height=\"200\">\n",
+            "  <rect id=\"left\" x=\"40\" y=\"60\" width=\"60\" height=\"60\" fill=\"#ff0000\"/>\n",
+            "  <rect id=\"right\" x=\"240\" y=\"60\" width=\"60\" height=\"60\" fill=\"#0000ff\"/>\n",
+            "</svg>"
+        );
+        let doc = Document::parse(src);
+        let set: HashSet<usize> = [2, 3].into_iter().collect(); // left=2, right=3
+        let out = doc.serialize(&Mode::HideMany(set));
+        assert!(!out.contains("id=\"left\""));
+        assert!(!out.contains("id=\"right\""));
     }
 
     #[test]

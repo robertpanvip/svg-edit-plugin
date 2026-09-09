@@ -140,4 +140,24 @@ class SidecarPanelTest {
             panel.dispose()
         }
     }
+
+    @Test
+    fun `group drag pre-renders layers covering every selected member`() {
+        FakeSidecar().use { fake ->
+            val panel = SvgEditorPanel(FakeSvgRenderer(), sidecar = fake)
+            panel.loadSvg(Samples.SIMPLE)
+            // Multi-select box-a + dot (dot = primary), then press-drag the dot: the panel must
+            // request ONE drag-layer pair whose background hides BOTH members.
+            panel.debugSetSelection(listOf("box-a", "dot"))
+            fake.hitNodeId = 3L
+            panel.debugPressDrag(150, 60, 170, 70) // press on the dot, keep the button held
+            assertEquals(listOf("box-a", "dot"), panel.selectedElementIds)
+            assertEquals(1, fake.count("startDragGroup"), "a group drag must pre-render group layers")
+            val group = fake.paramsOf("startDragGroup")
+            val nodeIds =
+                (group["nodeIds"] as List<*>).map { (it as Number).toLong() }.toSet()
+            assertEquals(setOf(2L, 3L), nodeIds, "the group pair must cover both selected members")
+            panel.dispose()
+        }
+    }
 }
