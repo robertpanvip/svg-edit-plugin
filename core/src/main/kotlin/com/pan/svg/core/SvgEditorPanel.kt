@@ -113,6 +113,19 @@ class SvgEditorPanel(
     private var fgCropY = 0.0
     private var layerId: String? = null
 
+    /**
+     * View parameters (scale × device-pixel ratio) the cached [bgImage]/[fgImage]/[fgCrop] were
+     * rendered for; -1 when no layers are cached. The drag layers are produced with the CURRENT
+     * [viewScale] baked in (region-mode renders), so painting them after a zoom would paste the
+     * element at the old geometry — exactly the "shape jumps a little when the composite kicks
+     * in" flicker. -1 = not the current view (forces a refresh before the layers may be used).
+     */
+    private var layerViewScale = -1.0
+    private var layerDpi = -1.0
+
+    /** True when the cached drag layers were rendered for the current view scale × dpr. */
+    private fun layersCurrent(): Boolean = layerViewScale == viewScale && layerDpi == dpiScale
+
     /** The layer request the panel is currently waiting for (staleness guard). */
     private var wantedLayer: LayerTag? = null
 
@@ -215,6 +228,8 @@ class SvgEditorPanel(
         val id: String,
         val w: Int,
         val h: Int,
+        val viewScale: Double,
+        val dpr: Double,
     )
 
     private val canvas =
@@ -712,6 +727,11 @@ class SvgEditorPanel(
         val h = engine.layout.height
         if (w <= 0 || h <= 0) return
         dpiScale = currentDpi()
+        // Cached drag layers embed the PREVIOUS view scale (region renders bake `scale` into
+        // their pixels). After a zoom they are stale: re-requested below, but never painted in
+        // the gap — drop them so the composite can't flash an old-size element (the selection
+        // "jump"). The fresh pair lands via requestLayers' staleness-guarded callback.
+        if (layerId != null && !layersCurrent()) clearLayers()
         requestContent()
         selectedId?.let { requestLayers(it) }
         staticDirty = true
@@ -900,7 +920,7 @@ class SvgEditorPanel(
             rebuildLayersSync(id)
             return
         }
-        val tag = LayerTag(engine.svgSource, id, devicePx(engine.layout.width), devicePx(engine.layout.height))
+        val tag = LayerTag(engine.svgSource, id, devicePx(engine.layout.width), devicePx(engine.layout.height), viewScale, dpiScale)
         wantedLayer = tag
         val src = tag.svg
         val rw = tag.w
@@ -916,8 +936,17 @@ class SvgEditorPanel(
             },
         ) { result, t ->
             val tt = t as? LayerTag
-            if (result != null && tt != null && tt === wantedLayer && tt.svg === engine.svgSource) {
+            if (
+                result != null &&
+                tt != null &&
+                tt === wantedLayer &&
+                tt.svg === engine.svgSource &&
+                tt.viewScale == viewScale &&
+                tt.dpr == dpiScale
+            ) {
                 layerId = tt.id
+                layerViewScale = tt.viewScale
+                layerDpi = tt.dpr
                 bgImage = result.first
                 fgImage = result.second
                 buildFgCrop()
@@ -941,7 +970,7 @@ class SvgEditorPanel(
         val w = engine.layout.width
         val h = engine.layout.height
         if (nodeId == 0L || w <= 0.0 || h <= 0.0) return
-        val tag = LayerTag(engine.svgSource, id, devicePx(w), devicePx(h))
+        val tag = LayerTag(engine.svgSource, id, devicePx(w), devicePx(h), viewScale, dpiScale)
         wantedLayer = tag
         val dpr = dpiScale
         val task = {
@@ -953,8 +982,16 @@ class SvgEditorPanel(
             }
         }
         val apply: (SidecarDragImages?) -> Unit = { result ->
-            if (result != null && wantedLayer === tag && tag.svg === engine.svgSource) {
+            if (
+                result != null &&
+                wantedLayer === tag &&
+                tag.svg === engine.svgSource &&
+                tag.viewScale == viewScale &&
+                tag.dpr == dpiScale
+            ) {
                 layerId = id
+                layerViewScale = tag.viewScale
+                layerDpi = tag.dpr
                 bgImage = result.background
                 fgImage = result.ghost
                 buildFgCrop()
@@ -980,6 +1017,8 @@ class SvgEditorPanel(
         val bg = renderer.renderRgba(SvgUtils.hideElement(engine.svgSource, id), rw, rh)
         val fg = renderer.renderRgba(SvgUtils.soloElement(engine.svgSource, id), rw, rh)
         layerId = id
+        layerViewScale = viewScale
+        layerDpi = dpiScale
         bgImage = RgbaImages.fromRgba(bg.rgba, bg.width, bg.height)
         fgImage = RgbaImages.fromRgba(fg.rgba, fg.width, fg.height)
         buildFgCrop()
@@ -1025,6 +1064,8 @@ class SvgEditorPanel(
         fgImage = null
         fgCrop = null
         layerId = null
+        layerViewScale = -1.0
+        layerDpi = -1.0
     }
 
     /**
@@ -1931,17 +1972,26 @@ class SvgEditorPanel(
     // ---- rendering --------------------------------------------------------
 
     private fun renderCanvas(g: Graphics2D) {
-        // Layered compositing (baked bg + cropped fg) whenever the CURRENTLY SELECTED element
-        // has cached layers — both DURING a drag and at rest — so the representation is
-        // identical across the drag->release boundary and the element never "pops" between
-        // preview and commit.
+        // Layered compositing (baked bg + cropped fg) exists to preview a move/resize/rotate at
+        // full fps: the background raster hides the element and the cropped foreground is blitted
+        // at the live (snapped) preview box. The composite must ONLY drive the picture while such
+        // a manipulation is actually in progress.
         //
-        // A mere hover (nothing selected) must never switch the canvas into this composite:
-        // the hover preheat builds the SAME layers ahead of a press, but painting them at rest
-        // silently swaps the whole frame to a separately re-rasterized bg+fg pair, which shows
-        // up as a one-frame flash/pop as the pointer glides over an element. Layers therefore
-        // only drive the picture once the element is actually selected (or being dragged).
-        val useLayers = layerId != null && layerId == selectedId && bgImage != null && fgImage != null
+        // A plain selection (click without moving) must keep painting the exact same content
+        // frame as the idle path — the full raster — so selecting an element can never make its
+        // pixels re-appear through a separate bg+fg pair (which is rasterised in a different
+        // pass, at a possibly stale view scale, and blitted through its own sub-pixel transform).
+        // That re-composite is what read as a subtle one-frame "jump" of the shape at the instant
+        // of selection. Hover pre-heats the same layers but must never switch the frame either.
+        val manipulationActive =
+            interaction.previewBox != null || interaction.previewAngle != 0.0
+        val layersReady =
+            layerId != null &&
+                layerId == selectedId &&
+                bgImage != null &&
+                fgImage != null &&
+                layersCurrent()
+        val useLayers = layersReady && manipulationActive
         if (useLayers) {
             staticDrag = true // the base raster for the layers is the bg layer (element hidden)
             if (staticLayer == null || staticDirty || staticBgColor != background) {
