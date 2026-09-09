@@ -2,8 +2,8 @@ package com.pan.svg.plugin
 
 import com.pan.svg.core.SidecarClient
 import com.pan.svg.core.SvgEditorPanel
-import com.pan.svg.core.SvgRenderer
 import com.intellij.openapi.Disposable
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.Document
@@ -15,6 +15,7 @@ import com.intellij.openapi.fileEditor.FileEditorLocation
 import com.intellij.openapi.fileEditor.FileEditorState
 import com.intellij.openapi.fileEditor.FileEditorStateLevel
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.Computable
 import com.intellij.openapi.util.UserDataHolderBase
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.JBColor
@@ -29,6 +30,7 @@ import javax.swing.JComponent
 import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.SwingConstants
+import javax.swing.SwingUtilities
 import javax.swing.Timer
 import kotlin.math.roundToInt
 
@@ -42,6 +44,14 @@ private val LOG = Logger.getInstance("SvgEasy")
  * container is the internal [root] component returned by [getComponent], keeping the editor
  * lifecycle separate from the widget hierarchy (the same shape the platform's own preview
  * editors use, since `TextEditorWithPreview` takes the preview as a `FileEditor`).
+ *
+ * Construction is cheap and never blocks the EDT: the constructor shows a brief "loading"
+ * placeholder and hands the expensive work (locating the native renderer, extracting JNA's
+ * jnidispatch, building the canvas, parsing the document) to a pooled thread
+ * ([startBackgroundInit]). The finished canvas is assembled onto [root] on the EDT. Text edits
+ * made while the renderer is still loading are picked up by the debounced reload as usual, and a
+ * load performed before the canvas existed is never lost — the background init parses the
+ * current document text when it runs.
  *
  * - text → canvas: a [DocumentListener] reloads the SVG into [SvgEditorPanel] whenever the source
  *   is edited in the text editor.
@@ -64,32 +74,21 @@ class SvgPreviewPanel(
     private val document: Document? = FileDocumentManager.getInstance().getDocument(file)
     private var suppressReload = false
 
+    /** Set when the editor is closed; a still-running background init must then discard its work. */
+    @Volatile private var disposed = false
+
+    /**
+     * The canvas, null until the background init finished (or when the native renderer is
+     * unavailable — e.g. plugin zip built on another OS — in which case the guide panel is shown
+     * instead and editing is disabled until the library is supplied). Filled on the EDT.
+     */
+    private var panel: SvgEditorPanel? = null
+
+    /** Built on the EDT once [panel] exists. */
+    private var toolbar: JComponent? = null
+
     /** Owned by this editor: closed in [dispose] (the panel only borrows it). */
     private var ownedSidecar: SidecarClient? = null
-
-    /**
-     * Null when the native renderer is unavailable (e.g. plugin zip built on another OS); in
-     * that case the guide panel is shown instead of the canvas and editing is disabled until the
-     * library is supplied.
-     */
-    private val panel: SvgEditorPanel? =
-        SvgBridgeLoader.loadOrNull()?.let { renderer ->
-            val sidecarClient = resolveSidecarClient()
-            SvgEditorPanel(renderer, asyncRendering = true, sidecar = sidecarClient).apply {
-                onEdit = { writeBack() }
-            }
-        }
-
-    /**
-     * Sidecar client for the document bound to this panel, or null when the executable is not
-     * bundled (the panel then runs the legacy in-process pipeline). Created once per editor.
-     */
-    private fun resolveSidecarClient(): SidecarClient? {
-        val command = SidecarLoader.resolveOrNull() ?: return null
-        return SidecarClient(listOf(command)).also { ownedSidecar = it }
-    }
-
-    private val toolbar: JComponent? = panel?.let { SvgEasyToolbar.forPanel(it) }
 
     /**
      * Bottom status strip mirroring the built-in image viewer's size display: shows the SVG's
@@ -137,7 +136,9 @@ class SvgPreviewPanel(
 
     /**
      * Text -> canvas sync, debounced 300ms (the spec's "text edits mirror back to the canvas"
-     * direction): the heavy parse/render runs once the user pauses, never mid-keystroke.
+     * direction): the heavy parse/render runs once the user pauses, never mid-keystroke. A tick
+     * that fires while the canvas is still being built is a no-op ([panel] is null then); the
+     * background init parses the current document text anyway.
      */
     private val reloadDebounce =
         Timer(300) {
@@ -147,19 +148,12 @@ class SvgPreviewPanel(
         }.apply { isRepeats = false }
 
     init {
-        if (panel != null) {
-            // Give the split panes a meaningful initial extent, so the preview isn't squeezed to
-            // zero width inside TextEditorWithPreview's splitter (the tool-window path uses a
-            // BorderLayout holder and always has room, which is why only the tab looked blank).
-            root.preferredSize = Dimension(480, 360)
-            root.minimumSize = Dimension(200, 120)
-            panel.onStatus = { refreshInfo() }
-            panel.onRenderError = { showParseError(it) }
-            // document can be null for exotic VFS states; fall back to the raw file bytes.
-            fileText()?.let { loadSafely(it) } ?: showCanvas()
-        } else {
-            root.add(NativeLibGuidePanel(SvgBridgeLoader.describeAttempts()), BorderLayout.CENTER)
-        }
+        // Give the split panes a meaningful initial extent, so the preview isn't squeezed to
+        // zero width inside TextEditorWithPreview's splitter (the tool-window path uses a
+        // BorderLayout holder and always has room, which is why only the tab looked blank).
+        root.preferredSize = Dimension(480, 360)
+        root.minimumSize = Dimension(200, 120)
+        showLoading()
         document?.addDocumentListener(documentListener)
         root.addComponentListener(
             object : ComponentAdapter() {
@@ -183,12 +177,110 @@ class SvgPreviewPanel(
             isRepeats = false
             start()
         }
+        startBackgroundInit()
+    }
+
+    private fun showLoading() {
+        root.removeAll()
+        root.add(
+            JLabel(
+                "<html><div style=\"text-align:center\">Loading SvgEasy…<br>" +
+                    "<span style=\"color:#888888\">preparing the native renderer</span></div></html>",
+            ).apply {
+                horizontalAlignment = SwingConstants.CENTER
+                verticalAlignment = SwingConstants.CENTER
+            },
+            BorderLayout.CENTER,
+        )
+        root.revalidate()
+        root.repaint()
+    }
+
+    /**
+     * Locates the native renderer OFF the EDT. The very first call extracts JNA's jnidispatch
+     * from an IDE lib jar — on a cold cache that previously blocked editor creation (inside
+     * `writeIntentReadAction` on the EDT) for >20 s. The result is cached process-wide, so later
+     * opens skip this step. Only the (fast) Swing canvas build and initial SVG parse happen back
+     * on the EDT; actual rendering is async inside [SvgEditorPanel].
+     */
+    private fun startBackgroundInit() {
+        val app = ApplicationManager.getApplication()
+        app.executeOnPooledThread {
+            val renderer = SvgBridgeLoader.loadOrNull()
+            if (disposed) return@executeOnPooledThread
+            val sidecar =
+                if (renderer != null) {
+                    runCatching {
+                        SidecarLoader.resolveOrNull()?.let { SidecarClient(listOf(it)) }
+                    }.onFailure { LOG.warn("preview: sidecar resolve failed; using in-process pipeline", it) }
+                        .getOrNull()
+                } else {
+                    null
+                }
+            val builtSidecar = sidecar
+            SwingUtilities.invokeLater {
+                if (disposed) {
+                    builtSidecar?.close()
+                    return@invokeLater
+                }
+                if (renderer == null) {
+                    // Native renderer missing: explain how to supply it.
+                    root.removeAll()
+                    root.add(NativeLibGuidePanel(SvgBridgeLoader.describeAttempts()), BorderLayout.CENTER)
+                    root.revalidate()
+                    root.repaint()
+                    return@invokeLater
+                }
+                val r = renderer
+                var canvas: SvgEditorPanel? = null
+                try {
+                    val c =
+                        SvgEditorPanel(r, asyncRendering = true, sidecar = builtSidecar).apply {
+                            onEdit = { writeBack() }
+                        }
+                    canvas = c
+                    panel = c
+                    ownedSidecar = builtSidecar
+                    try {
+                        toolbar = SvgEasyToolbar.forPanel(c)
+                    } catch (t: Throwable) {
+                        LOG.warn("preview: toolbar build failed", t)
+                        toolbar = null
+                    }
+                    c.onStatus = { refreshInfo() }
+                    c.onRenderError = { showParseError(it) }
+                    // Parse the current document text; a malformed SVG degrades to the visible
+                    // parse-error notice. fileText() reflects any edits the user already made
+                    // while the renderer was loading.
+                    try {
+                        fileText()?.let { c.loadSvg(it) }
+                    } catch (t: Throwable) {
+                        LOG.warn("preview: initial load failed", t)
+                        showParseError(t)
+                        return@invokeLater
+                    }
+                    showCanvas()
+                } catch (t: Throwable) {
+                    LOG.warn("preview: canvas build failed", t)
+                    canvas?.dispose()
+                    panel = null
+                    ownedSidecar = null
+                    builtSidecar?.close()
+                    showParseError(t)
+                }
+            }
+        }
     }
 
     /** Document text when available, else the file bytes; null when neither is readable. */
     private fun fileText(): String? =
         document?.text
-            ?: runCatching { String(file.contentsToByteArray(), Charsets.UTF_8) }.getOrNull()
+            ?: ApplicationManager.getApplication().runReadAction(
+                Computable<String?> { readFileBytes() },
+            )
+
+    private fun readFileBytes(): String? =
+        runCatching { String(file.contentsToByteArray(), Charsets.UTF_8) }.getOrNull()
 
     /** [SvgEditorPanel.loadSvg] that never throws: parse failures become a visible notice. */
     private fun loadSafely(text: String) {
@@ -204,9 +296,10 @@ class SvgPreviewPanel(
 
     private fun showCanvas() {
         val canvas = panel ?: return
-        if (canvas.parent === root && (toolbar == null || toolbar.parent === root)) return
+        val bar = toolbar
+        if (canvas.parent === root && (bar == null || bar.parent === root)) return
         root.removeAll()
-        toolbar?.let { root.add(it, BorderLayout.NORTH) }
+        bar?.let { root.add(it, BorderLayout.NORTH) }
         root.add(canvas, BorderLayout.CENTER)
         root.add(infoBar, BorderLayout.SOUTH)
         refreshInfo()
@@ -278,9 +371,11 @@ class SvgPreviewPanel(
     override fun getFile(): VirtualFile? = file
 
     override fun dispose() {
+        disposed = true
         document?.removeDocumentListener(documentListener)
         reloadDebounce.stop()
         panel?.dispose()
+        panel = null
         ownedSidecar?.close()
         ownedSidecar = null
     }

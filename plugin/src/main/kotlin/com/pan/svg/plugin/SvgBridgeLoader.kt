@@ -67,17 +67,44 @@ object SvgBridgeLoader {
         }
     }
 
+    private val lock = Any()
     private val attempts = mutableListOf<String>()
+
+    /**
+     * Loaded renderer, cached process-wide. Locating the native library is expensive the first
+     * time (JNA's jnidispatch may have to be dug out of the IDE lib jars — see [bootstrapJna])
+     * and every [SvgPreviewPanel] / tool window would otherwise repeat it on the UI thread.
+     * Only successes are cached: if loading failed the user may still drop a library into the
+     * config dir, and the next open should retry.
+     */
+    @Volatile private var cached: SvgRenderer? = null
 
     /** Records one lookup attempt as `path → result` and mirrors it to idea.log. */
     private fun record(what: String, ok: Boolean, error: Throwable?) {
         val line = if (ok) "$what  ✓" else "$what  ✗ ${error?.message ?: "not found"}"
-        attempts += line
+        synchronized(lock) { attempts += line }
         if (ok) LOG.info("bridge: $line") else LOG.warn("bridge: $line", error)
     }
 
-    /** Returns the loaded renderer, or null when every lookup fails (see [describeAttempts]). */
+    /**
+     * Returns the loaded renderer, or null when every lookup fails (see [describeAttempts]).
+     *
+     * The whole lookup is serialized and its (expensive) result cached, but the caller must
+     * never run this on the EDT — the first call extracts JNA's jnidispatch by opening jars
+     * under `<IDE home>/lib`, which on a cold cache can take tens of seconds. UI callers start
+     * it on a pooled thread (see [SvgPreviewPanel]) and assemble their UI afterwards.
+     */
     fun loadOrNull(): SvgRenderer? {
+        cached?.let { return it }
+        synchronized(lock) {
+            cached?.let { return it }
+            val r = loadOnce()
+            if (r != null) cached = r
+            return r
+        }
+    }
+
+    private fun loadOnce(): SvgRenderer? {
         attempts.clear()
         LOG.info("bridge: loadOrNull start, platform=${platformLabel()}, override=${System.getProperty(LIB_PATH_PROPERTY)}")
         bootstrapJna()
@@ -132,7 +159,7 @@ object SvgBridgeLoader {
     }
 
     /** Multi-line description of the attempts made by the last [loadOrNull] call. */
-    fun describeAttempts(): String = attempts.joinToString("\n")
+    fun describeAttempts(): String = synchronized(lock) { attempts.joinToString("\n") }
 
     /** Extract `/<platform-lib-name>` from the classpath to a temp file; returns its absolute path. */
     private fun extractBundled(): String? {
@@ -250,16 +277,38 @@ object SvgBridgeLoader {
             libDir.listFiles { f -> f.isFile && f.name.endsWith(".jar") }
                 ?.sortedBy { it.name }
                 ?: return null.also { LOG.warn("bridge: IDE lib dir not found: ${libDir.absolutePath}") }
+        if (jars.isEmpty()) return null
+
+        // jnidispatch always lives inside the JNA jar (`jna-*.jar`). Opening EVERY jar under
+        // <IDE home>/lib reads the central directory of hundreds of large jars, which alone froze
+        // editor creation for >20 s on a cold cache — so prefer the JNA jar by name. A full scan
+        // only happens for unusual layouts that have no `jna*` jar at all.
+        val jnaJars = jars.filter { it.name.startsWith("jna", ignoreCase = true) }
+        if (jnaJars.isEmpty()) {
+            for (jar in jars) {
+                val bytes = readEntry(jar, resource)
+                if (bytes != null) return jar.name to bytes
+            }
+            return null
+        }
+        for (jar in jnaJars) {
+            val bytes = readEntry(jar, resource)
+            if (bytes != null) return jar.name to bytes
+        }
+        // A `jna*.jar` exists but lacks the resource (unusual packaging) — finish the scan.
         for (jar in jars) {
-            val bytes =
-                runCatching {
-                    ZipFile(jar).use { zip ->
-                        val entry = zip.getEntry(resource) ?: return@use null
-                        zip.getInputStream(entry).use { it.readBytes() }
-                    }
-                }.getOrNull()
+            if (jar in jnaJars) continue
+            val bytes = readEntry(jar, resource)
             if (bytes != null) return jar.name to bytes
         }
         return null
     }
+
+    private fun readEntry(jar: File, resource: String): ByteArray? =
+        runCatching {
+            ZipFile(jar).use { zip ->
+                val entry = zip.getEntry(resource) ?: return@use null
+                zip.getInputStream(entry).use { it.readBytes() }
+            }
+        }.getOrNull()
 }
