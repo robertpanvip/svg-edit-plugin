@@ -31,6 +31,18 @@ fn to_ts(t: &usvg::Transform) -> tiny_skia::Transform {
     tiny_skia::Transform::from_row(t.sx, t.ky, t.kx, t.sy, t.tx, t.ty)
 }
 
+/// Node-space transform followed by the view scale.
+///
+/// tiny-skia's `self.post_concat(other)` maps points through `self` FIRST and then `other`
+/// (it builds `other ∘ self`), so composing the node's absolute transform and then `view`
+/// must be written `node.post_concat(view)`. The earlier `view.post_concat(node)` applied
+/// the view scale first and left the node's translation un-scaled in output pixels — exact
+/// only at scale 1, and off by `(1 - scale) * t` for every translated/scaled leaf at fit
+/// sizes (the visible ring band of a fitted gear icon was ~26 px away from the pick canvas).
+fn to_view_ts(node: &usvg::Transform, view: tiny_skia::Transform) -> tiny_skia::Transform {
+    to_ts(node).post_concat(view)
+}
+
 /// Fill a path with the flat ordinal colour (anti-aliased, opaque).
 fn fill_path_pick(
     pix: &mut tiny_skia::PixmapMut<'_>,
@@ -110,7 +122,7 @@ fn visit(
             if !has_fill && !has_stroke {
                 return; // never a pointer target (visiblePainted)
             }
-            let ts = view.post_concat(to_ts(&p.abs_transform()));
+            let ts = to_view_ts(&p.abs_transform(), view);
             if has_fill {
                 fill_path_pick(pix, p.data(), *ordinal, ts);
             }
@@ -124,7 +136,7 @@ fn visit(
                 return;
             }
             *ordinal += 1;
-            let ts = view.post_concat(to_ts(&img.abs_transform()));
+            let ts = to_view_ts(&img.abs_transform(), view);
             fill_rect_pick(pix, b, *ordinal, ts);
         }
         Node::Text(txt) => {
@@ -133,7 +145,7 @@ fn visit(
                 return;
             }
             *ordinal += 1;
-            let ts = view.post_concat(to_ts(&txt.abs_transform()));
+            let ts = to_view_ts(&txt.abs_transform(), view);
             fill_rect_pick(pix, b, *ordinal, ts);
         }
     }
@@ -216,5 +228,26 @@ mod tests {
         assert_eq!(rgb_at(&rgba, w, 12, 10), 2);
         // svg (150,60) = dot center -> pick px (75,30).
         assert_eq!(rgb_at(&rgba, w, 75, 30), 3);
+        // grp->inner sits at abs (120..160, 80..100) -> pick px (60..80, 40..50). Its group
+        // translate must be scaled WITH the view (regression: an inverted compose order left
+        // the translate un-scaled, pushing inner off the 100x60 canvas at px ~(120..140, 80..90)).
+        assert_eq!(rgb_at(&rgba, w, 70, 45), 4, "scaled translate must land inside (60..80,40..50)");
+        assert_eq!(rgb_at(&rgba, w, 5, 55), 1); // bottom-left stays bg (nothing leaked off-canvas)
+    }
+
+    #[test]
+    fn translates_scale_with_fit_scale_factor() {
+        // The user's gear icon shape: a path whose own transform carries a large translate
+        // combined with a fit scale < 1. The painted band must sit at view*t, never at t alone.
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+          <rect id="a" x="512" y="512" width="200" height="200" transform="translate(-100 -50)" fill="#333"/>
+        </svg>"##;
+        let (rgba, w, h) = render_pick(svg, 512, 512).expect("pick render");
+        assert_eq!((w, h), (512, 512));
+        // rect abs box = (412..612, 462..662); scale 0.5 -> px (206..306, 231..331).
+        assert_eq!(rgb_at(&rgba, w, 256, 281), 1, "translate must be scaled to view space");
+        // An UN-scaled translate paints at px (156..256, 206..306): x=200 sits inside that
+        // wrong-order band but 6 px left of the correct band's edge (206), so it must be empty.
+        assert_eq!(rgb_at(&rgba, w, 200, 281), 0, "translate must not shift un-scaled in px");
     }
 }
