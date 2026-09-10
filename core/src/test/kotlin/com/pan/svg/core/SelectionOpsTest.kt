@@ -4,6 +4,10 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.awt.event.KeyEvent
+import javax.swing.JComponent
+import javax.swing.JScrollPane
+import javax.swing.KeyStroke
+import javax.swing.SwingUtilities
 
 /**
  * Exercises the structural editing API the panel exposes for keyboard / layers / alignment:
@@ -104,6 +108,21 @@ class SelectionOpsTest {
             t != null && kotlin.math.abs(t.first - step) < 1e-3 && t.second == 0.0,
             "nudge must be 1% of the viewport widened to SVG units: got $t, want ($step, 0)",
         )
+        panel.dispose()
+    }
+
+    @Test
+    fun `the scroll pane does not swallow the arrow keys`() {
+        val panel = newPanel()
+        // The canvas lives in a JScrollPane whose default UI binds the arrows to its scroll
+        // actions (resolved BEFORE the key listener). Without neutralising those bindings the
+        // arrows never reach onKeyPressed, which is exactly why nudging silently did nothing.
+        val pane =
+            SwingUtilities.getAncestorOfClass(JScrollPane::class.java, panel.debugCanvas()) as JScrollPane
+        val im = pane.getInputMap(JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT)
+        for (code in intArrayOf(KeyEvent.VK_UP, KeyEvent.VK_DOWN, KeyEvent.VK_LEFT, KeyEvent.VK_RIGHT)) {
+            assertEquals("none", im.get(KeyStroke.getKeyStroke(code, 0)), "arrow $code must be unbound")
+        }
         panel.dispose()
     }
 

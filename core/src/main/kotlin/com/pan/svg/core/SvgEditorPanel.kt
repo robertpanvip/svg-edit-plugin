@@ -26,6 +26,7 @@ import java.awt.geom.Path2D
 import java.awt.geom.Rectangle2D
 import java.awt.image.BufferedImage
 import java.util.concurrent.Executors
+import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.JScrollPane
 import javax.swing.SwingUtilities
@@ -338,6 +339,7 @@ class SvgEditorPanel(
         // viewport; panning is done by moving the draw origin (see [panTo]).
         scrollPane.verticalScrollBarPolicy = JScrollPane.VERTICAL_SCROLLBAR_NEVER
         scrollPane.horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
+        disableScrollArrowKeys()
         add(scrollPane, BorderLayout.CENTER)
         installMouse()
         installKeys()
@@ -1616,6 +1618,24 @@ class SvgEditorPanel(
         canvas.repaint()
     }
 
+    /**
+     * Drop the [JScrollPane]'s default arrow-key scroll bindings.
+     *
+     * Swing resolves key bindings on the focused component's ancestors (WHEN_ANCESTOR_OF_FOCUSED_COMPONENT)
+     * *before* it fires the component's KeyListeners. The scroll pane binds the arrows to its scroll
+     * actions, so with focus on the canvas the arrows were consumed by the pane and never reached
+     * [onKeyPressed] — the selection could not be nudged. Scrollbars are disabled (the canvas is
+     * pinned to the viewport and panning is pointer/space driven), so those bindings are dead weight
+     * here; mapping them to `"none"` lets the key listener see the arrows again.
+     */
+    private fun disableScrollArrowKeys() {
+        val arrows = intArrayOf(KeyEvent.VK_UP, KeyEvent.VK_DOWN, KeyEvent.VK_LEFT, KeyEvent.VK_RIGHT)
+        val im = scrollPane.getInputMap(JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT)
+        for (ks in im.allKeys() ?: emptyArray()) {
+            if (ks != null && ks.keyCode in arrows) im.put(ks, "none")
+        }
+    }
+
     private fun installKeys() {
         canvas.addKeyListener(
             object : KeyAdapter() {
@@ -1688,18 +1708,22 @@ class SvgEditorPanel(
             // Arrow keys: nudge by 1% of the viewport, 10x with Shift held.
             e.keyCode == KeyEvent.VK_UP -> {
                 nudgeSelection(0.0, -nudgeStep(true) * nudgeFactor(e))
+                e.consume()
                 true
             }
             e.keyCode == KeyEvent.VK_DOWN -> {
                 nudgeSelection(0.0, nudgeStep(true) * nudgeFactor(e))
+                e.consume()
                 true
             }
             e.keyCode == KeyEvent.VK_LEFT -> {
                 nudgeSelection(-nudgeStep(false) * nudgeFactor(e), 0.0)
+                e.consume()
                 true
             }
             e.keyCode == KeyEvent.VK_RIGHT -> {
                 nudgeSelection(nudgeStep(false) * nudgeFactor(e), 0.0)
+                e.consume()
                 true
             }
 
