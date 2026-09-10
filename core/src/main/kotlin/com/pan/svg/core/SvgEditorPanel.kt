@@ -145,6 +145,9 @@ class SvgEditorPanel(
     private var staticDrag = false
     private var staticBgColor: Color? = null
 
+    /** Cached transparency-checkerboard tile (constant colours) — rebuilt never, blitted every frame. */
+    private var chessTile: BufferedImage? = null
+
     /** Sidecar-rendered content frame for the current view; null = legacy in-process raster. */
     private var vpImage: BufferedImage? = null
 
@@ -205,6 +208,18 @@ class SvgEditorPanel(
     /** Marquee (rubber-band) selection state, in panel pixels. */
     private var marqueeOrigin: Point? = null
     private var marqueeRect: Rectangle? = null
+
+    /**
+     * Dirty region accumulated across the current drag, in panel pixels. A drag only moves the
+     * foreground blit + selection overlay, so repainting just the union of the previous and new
+     * moving bounds (instead of the whole canvas) is what keeps a CPU-only device smooth: the
+     * background raster is a full-window blit, and painting it every mouse move is the drag's
+     * dominant cost. `null` = no partial region yet (repaint everything).
+     */
+    private var dragDirty: Rectangle? = null
+
+    /** True while the previous drag frame drew full-width/height snap guides (forces a full repaint). */
+    private var dragSnapFull = false
 
     /** Active tool. Defaults to [Tool.MOVE]; switch via [setTool]. */
     private var tool = Tool.MOVE
@@ -1794,13 +1809,125 @@ class SvgEditorPanel(
         interaction.onDragMove(engine.layout, ix, iy)
         // repaint() (not paintImmediately) lets Swing coalesce drag events into one paint per
         // frame; the moving element comes from the cached fgCrop blit, never from resvg.
-        canvas.repaint()
+        //
+        // Only the moving foreground + overlay change during a drag, so repaint just the union of
+        // the previous and the new moving bounds. Snap guides span the full canvas, so while they
+        // are (or just were) on screen fall back to a full repaint — otherwise their old strokes
+        // would leave trails.
+        if (interaction.snapLines.isNotEmpty() || dragSnapFull) {
+            dragSnapFull = interaction.snapLines.isNotEmpty()
+            dragDirty = null
+            canvas.repaint()
+            return
+        }
+        val cur = movingPanelBounds()
+        val prev = dragDirty
+        if (prev == null) {
+            // First moving frame: the current frame still shows the overlay/foreground at the
+            // committed position, which can fall outside `cur`. One full repaint clears it; from
+            // here on the union of the previous and new bounds is enough.
+            dragDirty = cur
+            canvas.repaint()
+            return
+        }
+        val union = prev.union(cur)
+        dragDirty = union
+        canvas.repaint(union.x, union.y, union.width, union.height)
+    }
+
+    /**
+     * Panel-pixel bounds of everything that moves with the current drag: the foreground crop
+     * (which is padded by `max(w,h)` on every side for arbitrary rotation — see [buildFgCrop])
+     * or the group ghost's union crop, plus the selection overlay's handles / rotate lever.
+     * Deliberately conservative (a few px of slack) so a partial repaint can never clip the
+     * moving pixels into a visible trail.
+     */
+    private fun movingPanelBounds(): Rectangle {
+        val ids = selectedIds
+        if (ids.isEmpty()) return Rectangle(0, 0, width, height)
+        // Live group translation (SVG units), or null outside a group move.
+        val groupDelta: Pair<Double, Double>? =
+            if (groupDrag && ids.size > 1 && interaction.previewBox != null) {
+                selectedId?.let { pid ->
+                    engine.layout.byId(pid)?.let { pri ->
+                        val pb = interaction.previewBox!!
+                        (pb.x - pri.x) to (pb.y - pri.y)
+                    }
+                }
+            } else {
+                null
+            }
+        var x0 = Double.MAX_VALUE
+        var y0 = Double.MAX_VALUE
+        var x1 = -Double.MAX_VALUE
+        var y1 = -Double.MAX_VALUE
+        for (id in ids) {
+            val el = engine.layout.byId(id) ?: continue
+            val isPrimary = id == selectedId
+            val bx: Double
+            val by: Double
+            when {
+                isPrimary -> {
+                    val pb = interaction.previewBox
+                    bx = pb?.x ?: el.x
+                    by = pb?.y ?: el.y
+                }
+                groupDelta != null -> {
+                    bx = el.x + groupDelta.first
+                    by = el.y + groupDelta.second
+                }
+                else -> {
+                    bx = el.x
+                    by = el.y
+                }
+            }
+            var ex0 = bx
+            var ey0 = by
+            var ex1 = bx + el.width
+            var ey1 = by + el.height
+            if (isPrimary && groupDelta == null) {
+                // The single-element foreground crop pads by max(w,h) per side for rotation slack
+                // (see [buildFgCrop]). When the primary is rotated, its AABB can grow to the crop's
+                // diagonal, so widen to a square that can never clip any rotation.
+                val pad = kotlin.math.max(el.width, el.height)
+                val hw = el.width / 2.0 + pad
+                val hh = el.height / 2.0 + pad
+                val cx = bx + el.width / 2.0
+                val cy = by + el.height / 2.0
+                val rot = interaction.previewAngle != 0.0
+                val halfX = if (rot) hw + hh else hw
+                val halfY = if (rot) hw + hh else hh
+                ex0 = cx - halfX
+                ex1 = cx + halfX
+                ey0 = cy - halfY
+                ey1 = cy + halfY
+            }
+            if (ex0 < x0) x0 = ex0
+            if (ey0 < y0) y0 = ey0
+            if (ex1 > x1) x1 = ex1
+            if (ey1 > y1) y1 = ey1
+        }
+        if (x1 <= x0 || y1 <= y0) return Rectangle(0, 0, width, height)
+        // Overlay slack: handles, stroke width and the rotate lever above the box.
+        val m = (EditorTheme.ROTATE_OFFSET + EditorTheme.ROTATE_R + 8).toDouble()
+        val rx0 = (offsetX + x0 * viewScale - m).coerceAtLeast(0.0)
+        val ry0 = (offsetY + y0 * viewScale - m).coerceAtLeast(0.0)
+        val rx1 = (offsetX + x1 * viewScale + m).coerceAtMost(width.toDouble())
+        val ry1 = (offsetY + y1 * viewScale + m).coerceAtMost(height.toDouble())
+        if (rx1 <= rx0 || ry1 <= ry0) return Rectangle(0, 0, width, height)
+        val ix = kotlin.math.floor(rx0).toInt()
+        val iy = kotlin.math.floor(ry0).toInt()
+        return Rectangle(ix, iy, (kotlin.math.ceil(rx1) - ix).toInt(), (kotlin.math.ceil(ry1) - iy).toInt())
     }
 
     private fun handlePress(
         x: Int,
         y: Int,
     ) {
+        // A new gesture starts from a clean slate: the previous drag's dirty region must not be
+        // unioned into this one's.
+        dragDirty = null
+        dragSnapFull = false
         // MARQUEE tool: pressing ANYWHERE — on an element or on empty canvas — begins a rubber
         // band. Move/resize/rotate are disabled in this mode; what gets selected is resolved on
         // release (finishMarquee): a drag selects the topmost element inside the band, a click
@@ -2112,6 +2239,8 @@ class SvgEditorPanel(
         // re-rendering the unchanged source is exactly the drag-then-snap-back symptom.
         if (committed) onEdit?.invoke()
         staticDirty = true
+        dragDirty = null
+        dragSnapFull = false
         canvas.repaint()
         emitStatus()
     }
@@ -2527,14 +2656,19 @@ class SvgEditorPanel(
         val h = engine.layout.height
         if (w <= 0 || h <= 0) return
         val cell = CHESS_CELL.toDouble()
-        val tile = BufferedImage(2 * CHESS_CELL, 2 * CHESS_CELL, BufferedImage.TYPE_INT_RGB)
-        val tg = tile.createGraphics()
-        tg.color = CHESS_WHITE
-        tg.fillRect(0, 0, tile.width, tile.height)
-        tg.color = CHESS_GRAY
-        tg.fillRect(cell.toInt(), 0, cell.toInt(), cell.toInt())
-        tg.fillRect(0, cell.toInt(), cell.toInt(), cell.toInt())
-        tg.dispose()
+        // The tile's colours are fixed, so build it once and reuse it across every frame instead
+        // of allocating a BufferedImage + Graphics2D per paint (a real cost during a drag).
+        val tile =
+            chessTile ?: BufferedImage(2 * CHESS_CELL, 2 * CHESS_CELL, BufferedImage.TYPE_INT_RGB).also {
+                val tg = it.createGraphics()
+                tg.color = CHESS_WHITE
+                tg.fillRect(0, 0, it.width, it.height)
+                tg.color = CHESS_GRAY
+                tg.fillRect(cell.toInt(), 0, cell.toInt(), cell.toInt())
+                tg.fillRect(0, cell.toInt(), cell.toInt(), cell.toInt())
+                tg.dispose()
+                chessTile = it
+            }
         val ax = offsetX
         val ay = offsetY
         val texture =
