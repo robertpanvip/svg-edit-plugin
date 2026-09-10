@@ -1836,11 +1836,15 @@ class SvgEditorPanel(
     }
 
     /**
-     * Panel-pixel bounds of everything that moves with the current drag: the foreground crop
-     * (which is padded by `max(w,h)` on every side for arbitrary rotation — see [buildFgCrop])
-     * or the group ghost's union crop, plus the selection overlay's handles / rotate lever.
-     * Deliberately conservative (a few px of slack) so a partial repaint can never clip the
+     * Panel-pixel bounds of everything that moves with the current drag: the primary's preview
+     * box, the other members' (translated) boxes, plus the selection overlay's handles / rotate
+     * lever. Deliberately conservative (a few px of slack) so a partial repaint can never clip the
      * moving pixels into a visible trail.
+     *
+     * A non-rotating edit (move / resize) only needs the box itself: the foreground crop's
+     * `max(w,h)` padding (see [buildFgCrop]) is transparent and never rotated into view, so folding
+     * it into the dirty rect would mean repainting ~3x more area than anything that changes. Only a
+     * live rotation needs the padded square, because then the crop really does sweep that area.
      */
     private fun movingPanelBounds(): Rectangle {
         val ids = selectedIds
@@ -1864,43 +1868,34 @@ class SvgEditorPanel(
         for (id in ids) {
             val el = engine.layout.byId(id) ?: continue
             val isPrimary = id == selectedId
-            val bx: Double
-            val by: Double
-            when {
-                isPrimary -> {
-                    val pb = interaction.previewBox
-                    bx = pb?.x ?: el.x
-                    by = pb?.y ?: el.y
-                }
-                groupDelta != null -> {
-                    bx = el.x + groupDelta.first
-                    by = el.y + groupDelta.second
-                }
-                else -> {
-                    bx = el.x
-                    by = el.y
-                }
+            val pb = if (isPrimary) interaction.previewBox else null
+            val bx = when {
+                pb != null -> pb.x
+                groupDelta != null -> el.x + groupDelta.first
+                else -> el.x
             }
+            val by = when {
+                pb != null -> pb.y
+                groupDelta != null -> el.y + groupDelta.second
+                else -> el.y
+            }
+            val bw = pb?.w ?: el.width
+            val bh = pb?.h ?: el.height
             var ex0 = bx
             var ey0 = by
-            var ex1 = bx + el.width
-            var ey1 = by + el.height
-            if (isPrimary && groupDelta == null) {
-                // The single-element foreground crop pads by max(w,h) per side for rotation slack
-                // (see [buildFgCrop]). When the primary is rotated, its AABB can grow to the crop's
-                // diagonal, so widen to a square that can never clip any rotation.
-                val pad = kotlin.math.max(el.width, el.height)
-                val hw = el.width / 2.0 + pad
-                val hh = el.height / 2.0 + pad
-                val cx = bx + el.width / 2.0
-                val cy = by + el.height / 2.0
-                val rot = interaction.previewAngle != 0.0
-                val halfX = if (rot) hw + hh else hw
-                val halfY = if (rot) hw + hh else hh
-                ex0 = cx - halfX
-                ex1 = cx + halfX
-                ey0 = cy - halfY
-                ey1 = cy + halfY
+            var ex1 = bx + bw
+            var ey1 = by + bh
+            if (isPrimary && groupDelta == null && interaction.previewAngle != 0.0) {
+                // Rotating: the foreground crop is padded by max(w,h) per side, and its rotated AABB
+                // can reach the crop's diagonal — widen to a square that can never clip the sweep.
+                val pad = kotlin.math.max(bw, bh)
+                val half = (bw / 2.0 + pad) + (bh / 2.0 + pad)
+                val cx = bx + bw / 2.0
+                val cy = by + bh / 2.0
+                ex0 = cx - half
+                ex1 = cx + half
+                ey0 = cy - half
+                ey1 = cy + half
             }
             if (ex0 < x0) x0 = ex0
             if (ey0 < y0) y0 = ey0
