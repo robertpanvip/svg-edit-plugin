@@ -78,6 +78,19 @@ class SvgEditorPanelTest {
     }
 
     @Test
+    fun `write-back strips synthetic ids so a dragged id-less document does not grow ids`() {
+        val panel = SvgEditorPanel(IdAwareSvgRenderer())
+        panel.loadSvg(Samples.NO_ID)
+        // The in-memory source keeps the synthetic anchors (that is what makes the edit stick)…
+        assertTrue(panel.svgSource.contains("""id="svg-el-1""""))
+        panel.debugDrag(Point(50, 40), Point(90, 80))
+        // …but what a host writes back to the user's file must be free of them.
+        val out = panel.svgSourceForWrite
+        assertFalse(out.contains("svg-el-"), "written SVG must not carry synthetic ids")
+        assertTrue(out.contains("translate(40, 40)"), "the committed move must survive stripping")
+    }
+
+    @Test
     fun `zoom math fits the viewport and stays stable across zoom steps`() {
         val panel = SvgEditorPanel(IdAwareSvgRenderer())
         panel.debugSetViewportSize(620, 460)

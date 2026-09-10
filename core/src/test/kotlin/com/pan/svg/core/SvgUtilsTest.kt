@@ -75,6 +75,39 @@ class SvgUtilsTest {
     }
 
     @Test
+    fun `stripElementIds removes exactly the injected ids and nothing else`() {
+        val (patched, injected) = SvgUtils.ensureElementIdsWithSynthetic(Samples.NO_ID)
+        assertEquals(setOf("svg-el-1", "svg-el-2", "svg-el-3", "svg-el-4"), injected)
+        val stripped = SvgUtils.stripElementIds(patched, injected)
+        // Everything injected disappears; the rest of the document is untouched. The only
+        // difference from the original is whitespace: injected tags gain a space before `/>`
+        // (insertIntoOpenTag's `" />"` format), so normalize that before the byte compare.
+        assertFalse(stripped.contains("svg-el-"), "no synthetic id may survive stripping")
+        val norm: (String) -> String = { s -> s.replace(" />", "/>").replace(" >", ">") }
+        assertEquals(norm(Samples.NO_ID), norm(stripped))
+    }
+
+    @Test
+    fun `stripElementIds keeps user ids and edits and skips vanished ids`() {
+        // A document mixing a user id with an id-less element: only the synthetic one goes away.
+        val mixed =
+            """
+            <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+              <rect id="mine" x="0" y="0" width="5" height="5" fill="#000"/>
+              <circle cx="5" cy="5" r="2" fill="#f00" transform="translate(3, 4)"/>
+            </svg>
+            """.trimIndent()
+        val (patched, injected) = SvgUtils.ensureElementIdsWithSynthetic(mixed)
+        assertEquals(setOf("svg-el-1"), injected)
+        val stripped = SvgUtils.stripElementIds(patched, injected)
+        assertTrue(stripped.contains("""id="mine""""), "user id must survive")
+        assertTrue(stripped.contains("translate(3, 4)"), "the edit must survive")
+        assertFalse(stripped.contains("svg-el-"), "synthetic id must be removed")
+        // Stripping ids that are no longer in the document is a no-op.
+        assertEquals(stripped, SvgUtils.stripElementIds(stripped, setOf("svg-el-9")))
+    }
+
+    @Test
     fun `soloElement keeps the ancestor group for a nested element`() {
         // `inner` lives inside <g id="grp" transform="translate(120,80)">. Soloing it must keep
         // that ancestor group (so the element keeps its absolute position) and must NOT keep the

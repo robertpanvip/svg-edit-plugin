@@ -351,13 +351,19 @@ object SvgUtils {
      * the drag layers break the same way). Hosts call this once at load; a document whose
      * elements all carry ids is returned unchanged.
      */
-    fun ensureElementIds(svg: String): String {
+    fun ensureElementIds(svg: String): String = ensureElementIdsWithSynthetic(svg).first
+
+    /**
+     * [ensureElementIds] plus the set of synthetic ids it injected, so a host can later strip
+     * them ([stripElementIds]) when writing the edited document back.
+     */
+    fun ensureElementIdsWithSynthetic(svg: String): Pair<String, Set<String>> {
         val spans = scanTags(svg)
         val missing =
             spans.filter { s ->
                 s.id == null && isEditableTag(svg.substring(s.openStart, s.openEnd))
             }
-        if (missing.isEmpty()) return svg
+        if (missing.isEmpty()) return svg to emptySet()
         val used = HashSet<String>()
         for (s in spans) s.id?.let { used.add(it) }
         // Assign numbers in document order (first element -> svg-el-1), then apply the
@@ -368,9 +374,30 @@ object SvgUtils {
                 while (!used.add("svg-el-$n")) n++
                 s to """id="svg-el-$n""""
             }
+        val injected =
+            attrs.map { (_, attr) -> attr.substringAfter('"').substringBeforeLast('"') }.toSet()
         var out = svg
         for ((s, attr) in attrs.asReversed()) {
             out = insertIntoOpenTag(out, s.openStart, s.openEnd, attr)
+        }
+        return out to injected
+    }
+
+    /**
+     * Remove every `id="…"` attribute whose value is in [synthetic]. Synthetic ids exist only
+     * so source-level edits can locate id-less elements; they must not leak into the user's
+     * document when the panel writes an edited SVG back. The ids in [synthetic] were chosen to
+     * avoid the user's real ids ([ensureElementIdsWithSynthetic]), so this never removes an
+     * attribute the user wrote. Ids that are no longer present (e.g. an element was deleted)
+     * are skipped.
+     */
+    fun stripElementIds(svg: String, synthetic: Set<String>): String {
+        if (synthetic.isEmpty()) return svg
+        var out = svg
+        for (id in synthetic) {
+            // The injected attribute is always ` id="<id>"` (insertIntoOpenTag format).
+            val re = Regex("""\s+id\s*=\s*"${Regex.escape(id)}"""")
+            out = re.replaceFirst(out, "")
         }
         return out
     }

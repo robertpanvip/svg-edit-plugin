@@ -424,6 +424,13 @@ class SvgEditorPanel(
     /** SVG source after edits. */
     val svgSource: String get() = engine.svgSource
 
+    /**
+     * SVG source after edits, with synthetic anchors stripped — what a host should write into
+     * the user's document ([svgSource] keeps them for internal editing; the written text must
+     * not grow `svg-el-N` attributes on id-less files).
+     */
+    val svgSourceForWrite: String get() = engine.sourceForWrite()
+
     /** Id of the currently selected element, or null. */
     val selectedElementId: String? get() = selectedId
 

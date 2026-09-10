@@ -352,7 +352,9 @@ class SvgPreviewPanel(
     private fun writeBack() {
         val doc = document ?: return
         val canvas = panel ?: return
-        val text = canvas.svgSource
+        // Use the stripped source: synthetic ids (`svg-el-N`) are internal edit anchors and must
+        // not leak into the user's file — an id-less SVG dragged once should not grow ids.
+        val text = canvas.svgSourceForWrite
         if (doc.text == text) return
         suppressReload = true
         try {

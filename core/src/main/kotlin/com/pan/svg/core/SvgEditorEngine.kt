@@ -43,6 +43,14 @@ class SvgEditorEngine(
      */
     private val geom = mutableMapOf<String, Pair<DoubleArray, InteractionController.Box>>()
 
+    /**
+     * Synthetic ids injected at load for elements that had none ([reloadLayoutEditable]).
+     * They anchor source-level edits but must not leak into the user's document: [sourceForWrite]
+     * strips them when a host writes the edited SVG back. Sidecar round-trips never have them
+     * ([adoptSource] clears the set), so the stripped output equals the committed SVG there.
+     */
+    private val syntheticIds = mutableSetOf<String>()
+
     fun load(svgText: String) {
         svg = svgText
         renderW = 0
@@ -81,8 +89,9 @@ class SvgEditorEngine(
      */
     private fun reloadLayoutEditable() {
         reloadLayout()
-        if (layout.elements.none { it.id.isBlank() }) return
-        val patched = SvgUtils.ensureElementIds(svg)
+        val (patched, injected) = SvgUtils.ensureElementIdsWithSynthetic(svg)
+        syntheticIds.clear()
+        syntheticIds.addAll(injected)
         if (patched != svg) {
             svg = patched
             reloadLayout()
@@ -232,9 +241,17 @@ class SvgEditorEngine(
         svg = text
         renderW = 0
         renderH = 0
+        syntheticIds.clear()
         layout = newLayout
         captureGeom()
     }
+
+    /**
+     * The SVG to hand to a host document on edit-commit: the live source with synthetic anchors
+     * stripped, so an id-less file never accumulates `svg-el-N` attributes. The in-memory [svg]
+     * keeps them — they are the edit anchors — only the written text loses them.
+     */
+    fun sourceForWrite(): String = SvgUtils.stripElementIds(svg, syntheticIds)
 
     /** Delete the element with `id` from the source and re-parse. False when no such element. */
     fun deleteElement(id: String): Boolean {
