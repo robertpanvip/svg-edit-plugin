@@ -368,7 +368,10 @@ class SvgPreviewPanel(
 
     override fun getComponent(): JComponent = root
 
-    override fun getPreferredFocusedComponent(): JComponent = root
+    // Focus the editor panel itself (not the wrapper) so the editing keys reach the canvas; the
+    // panel routes them to the canvas via its keyboard dispatcher. Falls back to the wrapper while
+    // the panel is still being built.
+    override fun getPreferredFocusedComponent(): JComponent = panel ?: root
 
     override fun getName(): String = "SvgEasy"
 

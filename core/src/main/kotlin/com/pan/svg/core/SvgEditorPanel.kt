@@ -7,6 +7,8 @@ import java.awt.Cursor
 import java.awt.Dimension
 import java.awt.Graphics
 import java.awt.Graphics2D
+import java.awt.KeyboardFocusManager
+import java.awt.KeyEventDispatcher
 import java.awt.Point
 import java.awt.Rectangle
 import java.awt.RenderingHints
@@ -285,6 +287,27 @@ class SvgEditorPanel(
 
     private val scrollPane = JScrollPane(canvas)
 
+    /**
+     * Application-wide key gate for the editing keys.
+     *
+     * A plain [KeyAdapter] on the canvas only fires when the canvas is the focus owner, and in the
+     * IDE two things get in the way: focus may land on the panel (or stay on the IDE's own
+     * component), and the IDE installs its keymap dispatcher on the same [KeyboardFocusManager].
+     * A dispatcher added later runs first (LIFO), so this one sees the key before the IDE keymap and
+     * before Swing's key bindings — but it only claims events whose focus owner is inside this
+     * panel, so typing anywhere else in the IDE is untouched.
+     */
+    private val keyDispatcher =
+        KeyEventDispatcher { e ->
+            if (e.id != KeyEvent.KEY_PRESSED) {
+                false
+            } else {
+                val owner = KeyboardFocusManager.getCurrentKeyboardFocusManager().focusOwner
+                val ours = owner != null && (owner === this || SwingUtilities.isDescendingFrom(owner, this))
+                if (ours) onKeyPressed(e) else false
+            }
+        }
+
     /** Coalesces wheel-zoom / resize bursts into a single crisp re-render. */
     private val crispTimer: Timer? =
         scheduler?.let {
@@ -332,6 +355,9 @@ class SvgEditorPanel(
         setLayout(BorderLayout())
         canvas.preferredSize = Dimension(640, 420)
         canvas.isFocusable = true
+        // Focusable itself so an IDE host can hand keyboard focus to the editor (its
+        // `getPreferredFocusedComponent`); [keyDispatcher] then routes the editing keys in.
+        isFocusable = true
         canvas.addComponentListener(
             object : ComponentAdapter() {
                 override fun componentResized(e: ComponentEvent) {
@@ -358,6 +384,7 @@ class SvgEditorPanel(
         add(scrollPane, BorderLayout.CENTER)
         installMouse()
         installKeys()
+        KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(keyDispatcher)
     }
 
     // ---- public API -------------------------------------------------------
@@ -757,6 +784,7 @@ class SvgEditorPanel(
     fun dispose() {
         crispTimer?.stop()
         preheatTimer?.stop()
+        KeyboardFocusManager.getCurrentKeyboardFocusManager().removeKeyEventDispatcher(keyDispatcher)
         scheduler?.dispose()
         // The sidecar process is owned by the host (plugin), not by this panel.
     }
@@ -1582,7 +1610,11 @@ class SvgEditorPanel(
         canvas.addMouseListener(
             object : MouseAdapter() {
                 override fun mousePressed(e: MouseEvent) {
+                    // Ask for focus twice: immediately, and again once the IDE's own focus handling
+                    // for this click has run (it can otherwise restore focus to its own component,
+                    // leaving the canvas unfocused and the editing keys dead).
                     canvas.requestFocusInWindow()
+                    SwingUtilities.invokeLater { canvas.requestFocusInWindow() }
                     when {
                         SwingUtilities.isMiddleMouseButton(e) -> {
                             panLast = viewportPoint(e)
@@ -2521,8 +2553,12 @@ class SvgEditorPanel(
         g: Graphics2D,
         preview: VpPreview,
     ) {
-        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR)
-        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
+        // This is the temporary "instant feedback" frame shown between wheel notches (a resample of
+        // the previous frame while the crisp one renders). It is repainted on every notch, so it
+        // must be cheap: NEAREST + SPEED resampling keeps fast zooming from dropping frames on a
+        // CPU-only machine, and the quality is restored the moment the real frame lands.
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR)
+        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_SPEED)
         g.drawImage(preview.img, preview.at, null)
     }
 
