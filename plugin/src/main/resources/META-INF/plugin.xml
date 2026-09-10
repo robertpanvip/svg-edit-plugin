@@ -2,7 +2,7 @@
     <id>com.pan.svg</id>
     <name>SVG Editor</name>
     <version>0.1.0</version>
-    <vendor email="dev@example.com" url="https://example.com">example</vendor>
+    <vendor email="robertpanvip@163.com" url="https://github.com/robertpanvip/svg-edit-plugin.git">PAN</vendor>
     <description>SVG editor with an interactive design canvas (move / resize / rotate) alongside the
         source text. Opens as a tab next to the built-in SVG image viewer.</description>
 
