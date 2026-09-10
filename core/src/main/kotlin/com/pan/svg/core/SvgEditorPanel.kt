@@ -607,7 +607,14 @@ class SvgEditorPanel(
         val p = if (primary in selectedIds) primary else selectedIds.last()
         selectedId = p
         groupDrag = false
-        if (layerId != p) requestLayers(p)
+        // Pre-heat the drag layers for the settled selection so the first press is warm:
+        // a multi-selection pre-renders the whole-group pair (background hides every member),
+        // a single selection its own pair.
+        if (selectedIds.size > 1) {
+            requestGroupLayers()
+        } else if (layerId != p) {
+            requestLayers(p)
+        }
         canvas.repaint()
         return p
     }
@@ -1148,15 +1155,19 @@ class SvgEditorPanel(
         val groupSnapshot = ids // the exact set this pair will cover
         val task = {
             try {
-                sc.startDragGroup(nodeIds, tag.w, tag.h, viewScale * dpr, 0.0, 0.0)
+                val imgs = sc.startDragGroup(nodeIds, tag.w, tag.h, viewScale * dpr, 0.0, 0.0)
+                // The tight crop needs an alpha scan of the ghost; keep it on the render worker
+                // so the EDT never pays for it (the drag would hitch on a HiDPI/large canvas).
+                imgs to ghostBounds(imgs.ghost)
             } catch (t: Throwable) {
                 lastRenderError = t
                 null
             }
         }
-        val apply: (SidecarDragImages?) -> Unit = { result ->
+        val apply: (Pair<SidecarDragImages, IntArray>?) -> Unit = { result ->
+            val imgs = result?.first
             if (
-                result != null &&
+                imgs != null &&
                 wantedLayer === tag &&
                 tag.svg === engine.svgSource &&
                 tag.viewScale == viewScale &&
@@ -1166,9 +1177,9 @@ class SvgEditorPanel(
                 layerGroup = groupSnapshot
                 layerViewScale = tag.viewScale
                 layerDpi = tag.dpr
-                bgImage = result.background
-                fgImage = result.ghost
-                buildGroupCrop()
+                bgImage = imgs.background
+                fgImage = imgs.ghost
+                buildGroupCrop(result.second)
                 staticDirty = true
                 canvas.repaint()
             } else if (result == null) {
@@ -1233,46 +1244,58 @@ class SvgEditorPanel(
     }
 
     /**
-     * Crop the group ghost down to the union bounding box of every [layerGroup] member (plus the
-     * same generous padding as [buildFgCrop], so no stroke or antialiasing is ever clipped). The
-     * group moves as a rigid unit — members never change their relative offsets — so the whole
-     * union crop is blitted at the primary member's drag delta in [drawGroupFg].
+     * Tight painted extent of `img` as `[x0, y0, x1, y1)` (x1/y1 exclusive), or an empty array
+     * when nothing is painted. Used for the group ghost, whose non-transparent bbox IS the exact
+     * box of the selected members (strokes and antialiasing included). Runs on the render worker.
      */
-    private fun buildGroupCrop() {
+    private fun ghostBounds(img: BufferedImage): IntArray {
+        val w = img.width
+        val h = img.height
+        if (w <= 0 || h <= 0) return IntArray(0)
+        var minX = w
+        var minY = h
+        var maxX = -1
+        var maxY = -1
+        val row = IntArray(w)
+        for (y in 0 until h) {
+            img.getRGB(0, y, w, 1, row, 0, w)
+            var x = 0
+            while (x < w && (row[x] ushr 24) <= 8) x++
+            if (x == w) continue // fully transparent row
+            if (x < minX) minX = x
+            var last = w - 1
+            while (last > x && (row[last] ushr 24) <= 8) last--
+            if (last > maxX) maxX = last
+            if (y < minY) minY = y
+            maxY = y
+        }
+        if (maxX < minX || maxY < minY) return IntArray(0)
+        return intArrayOf(minX, minY, maxX + 1, maxY + 1)
+    }
+
+    /**
+     * Crop the group ghost to the pre-computed painted extent ([ghostBounds]). Keeping the crop
+     * tight is what keeps the per-frame blit cheap: a loose union-based padding made it
+     * canvas-sized (members are often far apart) and the drag stuttered.
+     */
+    private fun buildGroupCrop(bounds: IntArray) {
         val fg = fgImage ?: run { fgCrop = null; return }
-        val g = layerGroup ?: run { fgCrop = null; return }
-        val els = g.mapNotNull { engine.layout.byId(it) }
-        if (els.isEmpty()) {
+        if (layerGroup == null || bounds.size != 4) {
             fgCrop = null
             return
         }
-        val dpr = dpiScale
-        val minX = els.minOf { it.x }
-        val minY = els.minOf { it.y }
-        val maxX = els.maxOf { it.right }
-        val maxY = els.maxOf { it.bottom }
-        val sx0 = minX * viewScale * dpr
-        val sy0 = minY * viewScale * dpr
-        val sw0 = (maxX - minX) * viewScale * dpr
-        val sh0 = (maxY - minY) * viewScale * dpr
-        if (sw0 <= 0.0 || sh0 <= 0.0) {
+        val pad = 2
+        val cx0 = (bounds[0] - pad).coerceAtLeast(0)
+        val cy0 = (bounds[1] - pad).coerceAtLeast(0)
+        val cx1 = (bounds[2] + pad).coerceAtMost(fg.width)
+        val cy1 = (bounds[3] + pad).coerceAtMost(fg.height)
+        if (cx1 - cx0 < 1 || cy1 - cy0 < 1) {
             fgCrop = null
             return
         }
-        val padPx = kotlin.math.max(sw0, sh0)
-        val cx0 = (sx0 - padPx).coerceAtLeast(0.0)
-        val cy0 = (sy0 - padPx).coerceAtLeast(0.0)
-        val right = (sx0 + sw0 + padPx).coerceAtMost(fg.width.toDouble())
-        val bottom = (sy0 + sh0 + padPx).coerceAtMost(fg.height.toDouble())
-        val cw0 = right - cx0
-        val ch0 = bottom - cy0
-        if (cw0 < 1 || ch0 < 1) {
-            fgCrop = null
-            return
-        }
-        fgCrop = fg.getSubimage(cx0.toInt(), cy0.toInt(), cw0.toInt(), ch0.toInt())
-        fgCropX = cx0
-        fgCropY = cy0
+        fgCrop = fg.getSubimage(cx0, cy0, cx1 - cx0, cy1 - cy0)
+        fgCropX = cx0.toDouble()
+        fgCropY = cy0.toDouble()
     }
 
     private fun clearLayers() {

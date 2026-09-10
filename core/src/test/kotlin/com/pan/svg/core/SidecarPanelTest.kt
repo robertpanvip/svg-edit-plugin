@@ -152,10 +152,14 @@ class SidecarPanelTest {
             fake.hitNodeId = 3L
             panel.debugPressDrag(150, 60, 170, 70) // press on the dot, keep the button held
             assertEquals(listOf("box-a", "dot"), panel.selectedElementIds)
-            assertEquals(1, fake.count("startDragGroup"), "a group drag must pre-render group layers")
-            val group = fake.paramsOf("startDragGroup")
+            // The settled multi-selection already pre-heats the group pair, and the press keeps
+            // using it — every call must cover BOTH members.
+            val calls = fake.count("startDragGroup")
+            assertTrue(calls >= 1, "a group drag must pre-render group layers")
             val nodeIds =
-                (group["nodeIds"] as List<*>).map { (it as Number).toLong() }.toSet()
+                (fake.paramsOf("startDragGroup", calls - 1)["nodeIds"] as List<*>)
+                    .map { (it as Number).toLong() }
+                    .toSet()
             assertEquals(setOf(2L, 3L), nodeIds, "the group pair must cover both selected members")
             panel.dispose()
         }
