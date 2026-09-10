@@ -457,7 +457,10 @@ object SvgUtils {
      * hides an ancestor group (which would also hide the element we actually want to show).
      *
      * The result keeps the original `<svg>` root attributes (width/height/viewBox) so the
-     * solo element renders at exactly the same coordinates as in the full document.
+     * solo element renders at exactly the same coordinates as in the full document. It also
+     * keeps every `<defs>` block: `<style>` class rules, gradients, symbols, clip paths and
+     * `<use>` targets live there, and without them a class-styled element would drag as an
+     * unstyled black shape and only "fix itself" once the full document re-renders.
      */
     fun soloElement(
         svg: String,
@@ -478,6 +481,10 @@ object SvgUtils {
         val rootOpen = svgRootOpenTag(svg)
         val sb = StringBuilder()
         sb.append(rootOpen)
+        // Preserve <defs> (in document order) so class styles and referenced definitions
+        // still apply to the solo element. <defs> itself never renders, so hoisting it
+        // right after the root is safe.
+        for ((ds, de) in defsBlocks(svg)) sb.append(svg.substring(ds, de))
         for (a in chain) sb.append(svg.substring(a.openStart, a.openEnd))
         val targetEnd = if (target.closeStart >= 0) target.closeEnd else target.openEnd
         sb.append(svg.substring(target.openStart, targetEnd))
@@ -677,5 +684,57 @@ object SvgUtils {
         // Normalise a self-closing root (extremely rare) to an open tag so we can nest children.
         if (tag.trimEnd().endsWith("/>")) tag = tag.substring(0, tag.length - 2) + ">"
         return tag
+    }
+
+    /**
+     * Spans of every `<defs>` block in `svg` (open tag through matching `</defs>`, or just the
+     * open tag when it is self-closing). Used by [soloElement] so class `<style>` rules and
+     * referenced definitions (gradients, symbols, clip paths, `<use>` targets) survive the
+     * slice. `scanTags` cannot supply this directly: it matches close tags for `<g>` groups
+     * only, and `<defs>` is not a group.
+     */
+    private fun defsBlocks(svg: String): List<Pair<Int, Int>> {
+        val out = mutableListOf<Pair<Int, Int>>()
+        var i = 0
+        while (i < svg.length) {
+            val lt = svg.indexOf("<defs", i, ignoreCase = true)
+            if (lt < 0) break
+            val afterName = lt + 5
+            val boundary = afterName >= svg.length || svg[afterName] == '>' || svg[afterName].isWhitespace()
+            val gt = svg.indexOf('>', lt)
+            if (!boundary || gt < 0) {
+                i = afterName
+                continue
+            }
+            if (svg.substring(lt, gt + 1).trimEnd().endsWith("/>")) {
+                out.add(lt to gt + 1)
+                i = gt + 1
+                continue
+            }
+            // Depth-scan to the matching close tag (nested <defs> is illegal but harmless to count).
+            var depth = 1
+            var j = gt + 1
+            var end = gt + 1
+            while (j < svg.length && depth > 0) {
+                val nlt = svg.indexOf('<', j)
+                if (nlt < 0) break
+                val ngt = svg.indexOf('>', nlt)
+                if (ngt < 0) break
+                val t = svg.substring(nlt, ngt + 1)
+                val name = Regex("""^</?([A-Za-z][\w-]*)""").find(t)?.groupValues?.get(1)?.lowercase()
+                if (name == "defs") {
+                    if (t.startsWith("</")) {
+                        depth--
+                        if (depth == 0) end = ngt + 1
+                    } else {
+                        depth++
+                    }
+                }
+                j = ngt + 1
+            }
+            out.add(lt to end)
+            i = gt + 1
+        }
+        return out
     }
 }

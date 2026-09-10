@@ -142,6 +142,19 @@ class SvgUtilsTest {
     }
 
     @Test
+    fun `soloElement keeps defs so class styles still apply to the drag ghost`() {
+        // A class-styled path renders differently without its <style> rule (default black fill
+        // instead of fill:none stroke:#333). The ghost must keep the whole <defs> block.
+        val patched = SvgUtils.ensureElementIds(Samples.CLASS_STYLED)
+        val solo = SvgUtils.soloElement(patched, "svg-el-1")
+        assertTrue(solo.startsWith("<svg"), "solo must keep the <svg> root")
+        assertTrue(solo.contains("<defs>"), "defs must survive the slice")
+        assertTrue(solo.contains(".b{fill:none"), "class style rule must survive the slice")
+        assertTrue(solo.contains("""class="b""""), "target element must keep its class")
+        assertTrue(solo.trimEnd().endsWith("</svg>"), "solo must be closed")
+    }
+
+    @Test
     fun `prependRotate inserts rotate before an existing transform`() {
         val s = """<svg><rect id="a" transform="translate(10, 20)"/></svg>"""
         val out = SvgUtils.prependRotate(s, "a", 45.0, 5.0, 6.0)

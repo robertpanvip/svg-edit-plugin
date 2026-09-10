@@ -42,7 +42,23 @@ object Samples {
     """
 
     /**
-     * An SVG whose elements carry NO `id` attributes — the shape produced by many design
+     * An SVG whose elements are styled by a CSS class inside `<defs>/<style>` and carry no
+     * `id` — the shape produced by icon tools. The drag **ghost** is a `soloElement` slice of
+     * the source, so it must keep the `<defs>` block or the class rule silently vanishes and
+     * the element drags as an unstyled black shape.
+     */
+    const val CLASS_STYLED: String = """
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20">
+          <defs>
+            <style>
+              .b{fill:none;stroke:#333;stroke-linecap:round;stroke-linejoin:round;stroke-width:1.1px;}
+            </style>
+          </defs>
+          <path class="b" d="M6.792 7.133a4.88 4.88 0 0 0 3.285 1.195 4.88 4.88 0 0 0 3.286-1.195"/>
+        </svg>
+    """
+
+    /** An SVG whose elements carry NO `id` attributes — the shape produced by many design
      * tools. `usvg` reports these elements with an empty id, which used to make every
      * source-level edit silently fail (drag-then-snap-back). The engine patches such
      * documents with synthetic ids at load time.

@@ -94,6 +94,28 @@ class ResvgIntegrationTest {
         assertTrue(engine.svg.contains("matrix("), "resize should emit a matrix(...) transform")
     }
 
+    @Test
+    fun `drag ghost of a class-styled element keeps its styles`() {
+        // A path styled by `.b{fill:none;stroke:#333;...}` must render identically when soloed
+        // for the drag ghost; dropping <defs> would turn it into an unstyled black filled shape.
+        val patched = SvgUtils.ensureElementIds(Samples.CLASS_STYLED)
+        val layout = SvgLayout.parse(bridge.layoutJson(patched))
+        val el = layout.elements.single()
+        val full = bridge.renderRgba(patched)
+        val ghost = bridge.renderRgba(SvgUtils.soloElement(patched, el.id))
+        assertEquals(full, ghost, "the ghost must render exactly like the full document")
+    }
+
+    @Test
+    fun `class-styled id-less element commits a move`() {
+        val engine = SvgEditorEngine(bridge)
+        engine.load(Samples.CLASS_STYLED)
+        val el = engine.layout.byId("svg-el-1")
+        assertNotNull(el, "synthetic id must anchor the class-styled path")
+        assertTrue(engine.moveElement("svg-el-1", 5.0, 3.0))
+        assertTrue(engine.svg.contains("translate(5, 3)"), "the committed move must survive")
+    }
+
     private fun nativeLibName(): String {
         val os = System.getProperty("os.name").lowercase()
         return when {
