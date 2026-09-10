@@ -480,6 +480,22 @@ class SvgEditorPanel(
     /** Paste the last [copySelection] buffer at an offset (Ctrl+V). */
     fun pasteClipboard() = duplicateIds(clipboard)
 
+    /**
+     * Arrow-key nudge step in canvas units: 1% of the visible viewport on the given axis. Expressing
+     * the step in viewport terms (rather than a fixed SVG unit) keeps a keypress moving the
+     * selection by the same fraction of the window at any zoom. When the viewport is unknown
+     * (no layout yet) fall back to 1% of the document extent so the key never becomes a no-op.
+     */
+    private fun nudgeStep(vertical: Boolean): Double {
+        val viewPx = (if (vertical) viewH() else viewW()).toDouble().takeIf { it > 0 }
+        val px = viewPx ?: (if (vertical) engine.layout.height else engine.layout.width)
+        val s = if (viewScale > 0.0) viewScale else 1.0
+        return px * 0.01 / s
+    }
+
+    /** Multiplier applied to the arrow-key nudge: Shift gives a coarse 10x step. */
+    private fun nudgeFactor(e: KeyEvent): Double = if (e.isShiftDown) 10.0 else 1.0
+
     /** Nudge the selection by `(dx, dy)` canvas units (arrow keys). */
     fun nudgeSelection(dx: Double, dy: Double) {
         if (selectedIds.isEmpty()) return
@@ -1669,21 +1685,21 @@ class SvgEditorPanel(
                 true
             }
 
-            // Arrow keys: nudge by 1 canvas unit, 10 with Shift held.
+            // Arrow keys: nudge by 1% of the viewport, 10x with Shift held.
             e.keyCode == KeyEvent.VK_UP -> {
-                nudgeSelection(0.0, if (e.isShiftDown) -10.0 else -1.0)
+                nudgeSelection(0.0, -nudgeStep(true) * nudgeFactor(e))
                 true
             }
             e.keyCode == KeyEvent.VK_DOWN -> {
-                nudgeSelection(0.0, if (e.isShiftDown) 10.0 else 1.0)
+                nudgeSelection(0.0, nudgeStep(true) * nudgeFactor(e))
                 true
             }
             e.keyCode == KeyEvent.VK_LEFT -> {
-                nudgeSelection(if (e.isShiftDown) -10.0 else -1.0, 0.0)
+                nudgeSelection(-nudgeStep(false) * nudgeFactor(e), 0.0)
                 true
             }
             e.keyCode == KeyEvent.VK_RIGHT -> {
-                nudgeSelection(if (e.isShiftDown) 10.0 else 1.0, 0.0)
+                nudgeSelection(nudgeStep(false) * nudgeFactor(e), 0.0)
                 true
             }
 

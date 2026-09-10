@@ -93,12 +93,17 @@ class SelectionOpsTest {
     }
 
     @Test
-    fun `arrow key nudges the selection by one canvas unit`() {
+    fun `arrow key nudges the selection by one percent of the viewport`() {
         val panel = newPanel()
         panel.debugSetSelection(listOf("dot"))
+        // The step is 1% of the 200px-wide viewport converted to SVG units at the current view scale.
+        val step = 200 * 0.01 / panel.debugViewScale()
         pressKey(panel, KeyEvent.VK_RIGHT)
-        // dot currently at x=120; a +1 nudge appears as translate(1, 0) in the source.
-        assertEquals(1.0 to 0.0, translateOf(panel.svgSource, "dot"))
+        val t = translateOf(panel.svgSource, "dot")
+        assertTrue(
+            t != null && kotlin.math.abs(t.first - step) < 1e-3 && t.second == 0.0,
+            "nudge must be 1% of the viewport widened to SVG units: got $t, want ($step, 0)",
+        )
         panel.dispose()
     }
 
