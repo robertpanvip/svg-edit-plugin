@@ -47,6 +47,16 @@ const ROTATE_OFFSET: f32 = 22.0;
 const MIN_SCALE: f32 = 0.01;
 /// Width of the selection frame's outline.
 const FRAME_STROKE: f32 = 1.5;
+/// Side of one transparency-chessboard square, in screen pixels. Fixed, like the image viewer's:
+/// the board marks "nothing is painted here", not a document-space measurement.
+const CHESS_CELL: f32 = 12.0;
+/// Smallest on-screen spacing the document grid is drawn at. Below this the lines merge into a
+/// grey wash, so the grid steps up to the next round number instead.
+const GRID_MIN_SPACING: f32 = 8.0;
+/// Document-unit spacings the grid snaps to, so the lines stay on round numbers while zooming.
+const GRID_STEPS: [f64; 12] = [
+    1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0,
+];
 
 /// Document units <-> window pixels.
 #[derive(Clone, Copy, Debug)]
@@ -89,6 +99,26 @@ pub struct View {
     /// Offset applied after centring, in window pixels.
     pub pan: Point<Pixels>,
     pub drag: Option<Drag>,
+    /// What a plain drag on the canvas does.
+    pub tool: Tool,
+    /// Draw the document-unit grid over the image.
+    pub grid: bool,
+    /// Draw the transparency chessboard behind the image.
+    pub chessboard: bool,
+}
+
+/// What a drag on the canvas means.
+///
+/// The two are mutually exclusive, the way the IntelliJ-side editor's toolbar presents them: with
+/// [`Tool::Move`] the pointer works on shapes, with [`Tool::Marquee`] it only draws a selection
+/// band.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum Tool {
+    /// Select, move, resize and rotate; a drag over empty canvas pans.
+    #[default]
+    Move,
+    /// Rubber-band selection; a drag anywhere draws the band.
+    Marquee,
 }
 
 #[derive(Clone, Copy)]
@@ -116,6 +146,12 @@ pub enum Drag {
     Rotate {
         center: (f64, f64),
         start: f32,
+        from: Point<Pixels>,
+        cursor: Point<Pixels>,
+    },
+    /// Drawing a selection band. Both points are window pixels so the band tracks the pointer
+    /// without a document-space round trip on every move.
+    Marquee {
         from: Point<Pixels>,
         cursor: Point<Pixels>,
     },
@@ -441,15 +477,164 @@ fn paint_frame(window: &mut Window, corners: [Point<Pixels>; 4]) {
     }
 }
 
+/// The part of `a` that lies inside `b`, or `None` when they do not meet.
+///
+/// The document rectangle routinely runs past the viewport once the user zooms in, so the overlay
+/// chrome is drawn over the overlap only: that keeps the work proportional to the window, not to
+/// how far the image extends off-screen.
+fn overlap(a: Bounds<Pixels>, b: Bounds<Pixels>) -> Option<Bounds<Pixels>> {
+    let left = a.origin.x.as_f32().max(b.origin.x.as_f32());
+    let top = a.origin.y.as_f32().max(b.origin.y.as_f32());
+    let right = (a.origin.x.as_f32() + a.size.width.as_f32())
+        .min(b.origin.x.as_f32() + b.size.width.as_f32());
+    let bottom = (a.origin.y.as_f32() + a.size.height.as_f32())
+        .min(b.origin.y.as_f32() + b.size.height.as_f32());
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(Bounds {
+        origin: point(px(left), px(top)),
+        size: size(px(right - left), px(bottom - top)),
+    })
+}
+
+/// The screen rectangle a selection band spans, whichever way the pointer was dragged.
+fn band_rect(from: Point<Pixels>, to: Point<Pixels>) -> Bounds<Pixels> {
+    let left = from.x.as_f32().min(to.x.as_f32());
+    let top = from.y.as_f32().min(to.y.as_f32());
+    Bounds {
+        origin: point(px(left), px(top)),
+        size: size(
+            px((to.x.as_f32() - from.x.as_f32()).abs()),
+            px((to.y.as_f32() - from.y.as_f32()).abs()),
+        ),
+    }
+}
+
+/// The document-unit spacing the grid is drawn at for a given zoom.
+fn grid_step(scale: f32) -> f64 {
+    GRID_STEPS
+        .iter()
+        .copied()
+        .find(|step| *step as f32 * scale >= GRID_MIN_SPACING)
+        .unwrap_or(*GRID_STEPS.last().expect("the ladder is not empty"))
+}
+
+/// Draws the transparency chessboard over `image`, clipped to the viewport.
+///
+/// Every dark square goes into a single path, so the board costs one draw call however many
+/// squares it has — a per-square quad would be thousands of them at this cell size.
+fn paint_chessboard(window: &mut Window, viewport: Bounds<Pixels>, image: Bounds<Pixels>) {
+    let Some(vis) = overlap(image, viewport) else {
+        return;
+    };
+    let (ix, iy) = (image.origin.x.as_f32(), image.origin.y.as_f32());
+    let (ir, ib) = (image.origin.x.as_f32() + image.size.width.as_f32(),
+                    image.origin.y.as_f32() + image.size.height.as_f32());
+    let (vr, vb) = (vis.origin.x.as_f32() + vis.size.width.as_f32(),
+                    vis.origin.y.as_f32() + vis.size.height.as_f32());
+    // The board is anchored to the document's own corner, so it stays put while panning.
+    let first_col = ((vis.origin.x.as_f32() - ix) / CHESS_CELL).floor().max(0.0) as i32;
+    let last_col = ((ir - ix) / CHESS_CELL).ceil() as i32 - 1;
+    let first_row = ((vis.origin.y.as_f32() - iy) / CHESS_CELL).floor().max(0.0) as i32;
+    let last_row = ((ib - iy) / CHESS_CELL).ceil() as i32 - 1;
+
+    let mut path = PathBuilder::fill();
+    for row in first_row..=last_row {
+        // Clipped to the visible part of the document, so the last row and column stop at the
+        // page edge rather than spilling a whole cell past it.
+        let y0 = (iy + row as f32 * CHESS_CELL).max(vis.origin.y.as_f32());
+        let y1 = (iy + (row + 1) as f32 * CHESS_CELL).min(ib).min(vb);
+        for col in first_col..=last_col {
+            if (row + col) % 2 != 0 {
+                continue;
+            }
+            let x0 = (ix + col as f32 * CHESS_CELL).max(vis.origin.x.as_f32());
+            let x1 = (ix + (col + 1) as f32 * CHESS_CELL).min(ir).min(vr);
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
+            path.move_to(point(px(x0), px(y0)));
+            path.line_to(point(px(x1), px(y0)));
+            path.line_to(point(px(x1), px(y1)));
+            path.line_to(point(px(x0), px(y1)));
+            path.close();
+        }
+    }
+    if let Ok(path) = path.build() {
+        window.paint_path(path, theme::chess_dark());
+    }
+}
+
+/// Draws the document-unit grid over the image, clipped to the viewport.
+fn paint_grid(
+    window: &mut Window,
+    viewport: Bounds<Pixels>,
+    image: Bounds<Pixels>,
+    scale: f32,
+) {
+    let Some(vis) = overlap(image, viewport) else {
+        return;
+    };
+    let step = grid_step(scale);
+    let spacing = step as f32 * scale;
+    if spacing < 1.0 {
+        return;
+    }
+    let (ix, iy) = (image.origin.x.as_f32(), image.origin.y.as_f32());
+
+    let mut path = PathBuilder::stroke(px(1.0));
+    // Only the lines crossing the visible part of the document are drawn.
+    let first_col = ((vis.origin.x.as_f32() - ix) / spacing).ceil().max(0.0) as i32;
+    let last_col = ((vis.origin.x.as_f32() + vis.size.width.as_f32() - ix) / spacing).floor() as i32;
+    for col in first_col..=last_col {
+        let x = ix + col as f32 * spacing;
+        path.move_to(point(px(x), vis.origin.y));
+        path.line_to(point(px(x), px(vis.origin.y.as_f32() + vis.size.height.as_f32())));
+    }
+    let first_row = ((vis.origin.y.as_f32() - iy) / spacing).ceil().max(0.0) as i32;
+    let last_row = ((vis.origin.y.as_f32() + vis.size.height.as_f32() - iy) / spacing).floor() as i32;
+    for row in first_row..=last_row {
+        let y = iy + row as f32 * spacing;
+        path.move_to(point(vis.origin.x, px(y)));
+        path.line_to(point(px(vis.origin.x.as_f32() + vis.size.width.as_f32()), px(y)));
+    }
+    if let Ok(path) = path.build() {
+        window.paint_path(path, theme::grid_line());
+    }
+}
+
+/// Draws the band a rubber-band selection is currently spanning.
+fn paint_band(window: &mut Window, rect: Bounds<Pixels>) {
+    window.paint_quad(gpui::fill(rect, theme::band_fill()));
+    let mut path = PathBuilder::stroke(px(1.0));
+    path.move_to(rect.origin);
+    path.line_to(point(px(rect.origin.x.as_f32() + rect.size.width.as_f32()), rect.origin.y));
+    path.line_to(point(
+        px(rect.origin.x.as_f32() + rect.size.width.as_f32()),
+        px(rect.origin.y.as_f32() + rect.size.height.as_f32()),
+    ));
+    path.line_to(point(rect.origin.x, px(rect.origin.y.as_f32() + rect.size.height.as_f32())));
+    path.close();
+    if let Ok(path) = path.build() {
+        window.paint_path(path, theme::selection());
+    }
+}
+
 impl View {
     pub fn new() -> Self {
         Self {
             zoom: 1.0,
             pan: point(px(0.), px(0.)),
             drag: None,
+            tool: Tool::default(),
+            grid: false,
+            // On by default, the way the image viewer shows a transparent document.
+            chessboard: true,
         }
     }
 
+    /// Back to "fit", without touching the tool or the view toggles.
     pub fn reset(&mut self) {
         self.zoom = 1.0;
         self.pan = point(px(0.), px(0.));
@@ -457,7 +642,7 @@ impl View {
 }
 
 /// Pixels per document unit for the current viewport and zoom.
-fn view_scale(bounds: Bounds<Pixels>, doc: (f64, f64), zoom: f32) -> f32 {
+pub fn view_scale(bounds: Bounds<Pixels>, doc: (f64, f64), zoom: f32) -> f32 {
     let avail_w = bounds.size.width.as_f32().max(1.0);
     let avail_h = bounds.size.height.as_f32().max(1.0);
     let fit = (avail_w / (doc.0.max(1e-6) as f32)).min(avail_h / (doc.1.max(1e-6) as f32));
@@ -552,6 +737,8 @@ impl SvgEasyApp {
         let source: Arc<str> = Arc::from(self.editor.source.as_str());
         let frame_doc = self.editor.selection_frame();
         let gesture = self.view.drag;
+        let grid = self.view.grid;
+        let chessboard = self.view.chessboard;
 
         let raster = canvas(
             move |bounds, _window, _cx| {
@@ -600,11 +787,20 @@ impl SvgEasyApp {
                 };
 
                 let overlay = overlay(&m, doc, frame_doc, gesture);
+                let band = match gesture {
+                    Some(Drag::Marquee { from, cursor }) => Some(band_rect(from, cursor)),
+                    _ => None,
+                };
 
-                (m, image, layers, overlay)
+                (m, image, layers, overlay, band)
             },
-            move |bounds, (m, image, layers, overlay), window, _cx| {
+            move |bounds, (m, image, layers, overlay, band), window, _cx| {
                 let image_rect = m.image_bounds(doc);
+                // The board sits between the canvas backdrop and the document, so transparent
+                // regions of the SVG show it and painted regions cover it.
+                if chessboard {
+                    paint_chessboard(window, bounds, image_rect);
+                }
                 // The shape being transformed is blitted separately, so the static raster — which
                 // still shows it where it started — is replaced by the background with it cut
                 // out. Painting both would double it.
@@ -645,8 +841,17 @@ impl SvgEasyApp {
                     );
                 }
 
+                // Over the image, the way the image viewer draws it.
+                if grid {
+                    paint_grid(window, bounds, image_rect, m.scale);
+                }
+
                 if let Some(o) = &overlay {
                     paint_frame(window, o.corners);
+                }
+
+                if let Some(rect) = band {
+                    paint_band(window, rect);
                 }
             },
         )
@@ -700,6 +905,17 @@ impl SvgEasyApp {
 
         // Any pair left over from an earlier gesture belongs to a document state we are past.
         self.shared.borrow_mut().drag = None;
+
+        // Band mode owns the whole canvas: the pointer is only ever drawing a selection, so the
+        // grips and the shapes underneath are all out of play until the band is released.
+        if self.view.tool == Tool::Marquee {
+            self.view.drag = Some(Drag::Marquee {
+                from: ev.position,
+                cursor: ev.position,
+            });
+            cx.notify();
+            return;
+        }
 
         // A grip wins over whatever is under it, so a selected shape can be resized even though
         // its own edge is the busiest part of the canvas.
@@ -796,6 +1012,13 @@ impl SvgEasyApp {
                 });
                 cx.notify();
             }
+            Some(Drag::Marquee { from, .. }) => {
+                self.view.drag = Some(Drag::Marquee {
+                    from,
+                    cursor: ev.position,
+                });
+                cx.notify();
+            }
             None => {}
         }
     }
@@ -885,6 +1108,32 @@ impl SvgEasyApp {
                     cx.notify();
                 }
             }
+            Drag::Marquee { from, cursor } => {
+                let Some(m) = self.mapping() else {
+                    cx.notify();
+                    return;
+                };
+                if !moved_enough(from, cursor) {
+                    // A click in band mode still means "pick what is under the pointer".
+                    let (x, y) = m.screen_to_doc(cursor);
+                    let tolerance = HIT_SLOP_PX / m.scale.max(1e-6) as f64;
+                    match self.editor.hit(x, y, tolerance) {
+                        Some(node) => self.editor.select_only(node),
+                        None => self.editor.clear_selection(),
+                    }
+                    cx.notify();
+                    return;
+                }
+                let (ax, ay) = m.screen_to_doc(from);
+                let (bx, by) = m.screen_to_doc(cursor);
+                self.editor.select_in_rect([
+                    ax.min(bx),
+                    ay.min(by),
+                    (bx - ax).abs(),
+                    (by - ay).abs(),
+                ]);
+                cx.notify();
+            }
         }
     }
 
@@ -956,6 +1205,26 @@ mod tests {
             scale: 1.0,
             origin: point(px(100.), px(50.)),
         }
+    }
+
+    #[test]
+    fn the_grid_snaps_to_a_round_spacing_that_stays_legible() {
+        // A finer spacing than the floor would read as a grey wash, so the ladder steps up.
+        assert_eq!(grid_step(1.0), 10.0);
+        assert_eq!(grid_step(4.0), 2.0);
+        assert_eq!(grid_step(0.5), 20.0);
+        // Zoomed far enough in, the finest spacing on the ladder is the honest one.
+        assert_eq!(grid_step(16.0), 1.0);
+    }
+
+    #[test]
+    fn a_band_covers_the_same_rectangle_whichever_way_it_was_dragged() {
+        let down_right = band_rect(point(px(10.), px(10.)), point(px(30.), px(40.)));
+        let up_left = band_rect(point(px(30.), px(40.)), point(px(10.), px(10.)));
+        assert!((down_right.origin.x.as_f32() - up_left.origin.x.as_f32()).abs() < 1e-3);
+        assert!((down_right.origin.y.as_f32() - up_left.origin.y.as_f32()).abs() < 1e-3);
+        assert!((down_right.size.width.as_f32() - 20.0).abs() < 1e-3);
+        assert!((down_right.size.height.as_f32() - 30.0).abs() < 1e-3);
     }
 
     #[test]

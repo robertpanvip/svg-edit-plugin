@@ -1,0 +1,9 @@
+<!-- Drawn for SVG Easy in the IntelliJ expui style (16x16, currentColor): JetBrains ships no
+     expui glyph for the Move tool, so this one matches its geometry conventions instead. -->
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M8 1.2 5.5 4.6h5L8 1.2Z" fill="currentColor"/>
+<path d="M8 14.8 5.5 11.4h5L8 14.8Z" fill="currentColor"/>
+<path d="M1.2 8 4.6 5.5v5L1.2 8Z" fill="currentColor"/>
+<path d="M14.8 8 11.4 5.5v5L14.8 8Z" fill="currentColor"/>
+<path d="M8 4.8v6.4M4.8 8h6.4" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>
+</svg>

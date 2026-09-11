@@ -24,9 +24,15 @@
 //!
 //! The toolchain is pinned in `rust-toolchain.toml` — `gpui-pre` 0.3.x needs Rust >= 1.98.
 
+// A Windows release build is a GUI application: without this the linker keeps the console
+// subsystem, so launching the .exe also opens a command prompt window. Debug builds keep it, so
+// `cargo run` still shows the log output.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod canvas;
 mod document;
+mod icons;
 mod image_conv;
 mod theme;
 
@@ -80,6 +86,9 @@ fn main() {
     application().run(move |cx: &mut App| {
         // Must run before any gpui-component widget is built (theme, Root machinery, input, ...).
         gpui_component::init(cx);
+        // The library defaults to its light theme, which clashes with the editor's dark chrome —
+        // every widget it draws (buttons, text area, scrollbars) has to be in dark mode.
+        gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
         own_undo_shortcuts(cx);
         register_xml_language();
 

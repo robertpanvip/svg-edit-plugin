@@ -214,6 +214,77 @@ impl Editor {
         !self.selection.is_empty()
     }
 
+    /// Selects every element whose box intersects `rect` (document units), for a rubber-band
+    /// selection. Returns true when the selection changed.
+    ///
+    /// Intersection rather than containment is deliberate: a band drawn over a large compound
+    /// shape only covers part of it, so "must be fully inside" would make the band look broken on
+    /// anything bigger than itself. An element covering the whole document is skipped — that is a
+    /// page background, and a band over the artwork must not start dragging it along.
+    pub fn select_in_rect(&mut self, rect: [f64; 4]) -> bool {
+        let Some(session) = self.session.as_ref() else {
+            return false;
+        };
+        let (page_w, page_h) = (session.width, session.height);
+        let layout = session.layout_json();
+        let hits: Vec<(usize, usize, [f64; 4])> = layout["elements"]
+            .as_array()
+            .map(|elements| {
+                elements
+                    .iter()
+                    .filter_map(|e| {
+                        let node_id = e["nodeId"].as_u64()? as usize;
+                        let depth = e["depth"].as_u64().unwrap_or(0) as usize;
+                        let b = [
+                            e["x"].as_f64()?,
+                            e["y"].as_f64()?,
+                            e["w"].as_f64()?,
+                            e["h"].as_f64()?,
+                        ];
+                        let meets = b[0] < rect[0] + rect[2]
+                            && b[0] + b[2] > rect[0]
+                            && b[1] < rect[1] + rect[3]
+                            && b[1] + b[3] > rect[1];
+                        let covers_page = b[0] <= 0.0
+                            && b[1] <= 0.0
+                            && b[0] + b[2] >= page_w - 0.5
+                            && b[1] + b[3] >= page_h - 0.5;
+                        (meets && !covers_page).then_some((node_id, depth, b))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // A group and the children inside it can both meet the band. Keeping only the outermost
+        // is what stops one root-space matrix from being applied twice to a child: the group
+        // already carries it down. The listing is in tree order, so a parent is always seen
+        // before its descendants and the open ancestors can be tracked as a stack.
+        let mut ancestors: Vec<(usize, [f64; 4])> = Vec::new();
+        let mut picked: Vec<usize> = Vec::new();
+        for (node_id, depth, b) in hits {
+            while ancestors.last().is_some_and(|(d, _)| depth <= *d) {
+                ancestors.pop();
+            }
+            let inside = |outer: &[f64; 4]| {
+                outer[0] <= b[0] + 0.01
+                    && outer[1] <= b[1] + 0.01
+                    && outer[0] + outer[2] >= b[0] + b[2] - 0.01
+                    && outer[1] + outer[3] >= b[1] + b[3] - 0.01
+            };
+            if ancestors.iter().any(|(_, outer)| inside(outer)) {
+                continue;
+            }
+            picked.push(node_id);
+            ancestors.push((depth, b));
+        }
+
+        if picked == self.selection {
+            return false;
+        }
+        self.selection = picked;
+        true
+    }
+
     /// Moves every selected element by (`dx`, `dy`) document units.
     pub fn translate_selection(&mut self, dx: f64, dy: f64) -> bool {
         self.transform_selection(Mat::translate(dx, dy))
@@ -636,6 +707,49 @@ mod tests {
             e.selection_frame().unwrap(),
             [frame[0], frame[1], frame[2] * 2.0, frame[3] * 2.0],
         );
+    }
+
+    #[test]
+    fn a_band_selects_every_shape_it_touches_once() {
+        let mut e = editor();
+        let card = e.hit(60.0, 60.0, 2.0).expect("card must be hit");
+        let dot = e.hit(318.0, 92.0, 2.0).expect("dot must be hit");
+
+        // A band down the left of the sample: over the card and the `bars` group.
+        assert!(e.select_in_rect([20.0, 20.0, 220.0, 260.0]));
+        assert!(e.selection.contains(&card));
+        assert!(
+            !e.selection.contains(&dot),
+            "the dot sits outside the band",
+        );
+        // The group is picked, not the group *and* its three children: one root-space matrix
+        // applied to both a parent and its child would move the child twice.
+        assert_eq!(e.selection.len(), 2, "{:?}", e.selection);
+
+        // A selection needs no edit, so it does not touch the source or the undo stack.
+        assert!(!e.dirty());
+        assert!(!e.can_undo());
+
+        // The same band over the same shapes is not a change.
+        assert!(!e.select_in_rect([20.0, 20.0, 220.0, 260.0]));
+
+        // A band over empty canvas clears the selection.
+        assert!(e.select_in_rect([400.0, 260.0, 10.0, 10.0]));
+        assert!(e.selection.is_empty());
+    }
+
+    #[test]
+    fn a_band_ignores_a_page_background() {
+        let source = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 100 100">
+  <rect id="page" x="0" y="0" width="100" height="100" fill="#ffffff"/>
+  <circle id="dot" cx="50" cy="50" r="10" fill="#000000"/>
+</svg>"##;
+        let mut e = Editor::new(source.to_string(), None);
+        let dot = e.hit(50.0, 50.0, 2.0).expect("dot must be hit");
+
+        // A band over the whole document must not start dragging the page background along.
+        assert!(e.select_in_rect([0.0, 0.0, 100.0, 100.0]));
+        assert_eq!(e.selection, vec![dot]);
     }
 
     #[test]

@@ -1,0 +1,6 @@
+<!-- Drawn for SVG Easy in the IntelliJ expui style (16x16, currentColor): JetBrains ships no
+     expui glyph for a rubber-band selection, so this one matches its geometry conventions. -->
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect x="2.5" y="2.5" width="11" height="11" rx="1" stroke="currentColor" stroke-width="1.2"
+      stroke-dasharray="2.6 2"/>
+</svg>

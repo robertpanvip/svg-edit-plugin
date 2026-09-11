@@ -5,19 +5,20 @@ use std::path::PathBuf;
 
 use gpui::{
     AnyElement, AppContext as _, Bounds, Context, Entity, FocusHandle, IntoElement, KeyDownEvent,
-    ParentElement, PathPromptOptions, Pixels, Render, Styled, Subscription, Window, div, prelude::*,
-    px, rgba, rgb,
+    ParentElement, PathPromptOptions, Pixels, Render, Styled, Subscription, Window, div, point,
+    prelude::*, px, rgba, rgb,
 };
 use gpui_component::{
-    Disableable, h_resizable,
+    Disableable, Selectable, h_resizable,
     button::Button,
     input::{Editor, EditorState, InputEvent},
     resizable_panel,
 };
 use resvg_bridge::dom::Stack;
 
-use crate::canvas::{self, Mapping, Shared, View};
+use crate::canvas::{self, Mapping, Shared, Tool, View};
 use crate::document::{self, Editor as Document, Layer};
+use crate::icons::ToolbarIcon;
 use crate::theme;
 
 /// Width of the layer panel at startup. The divider is draggable, so this is only the initial split.
@@ -239,6 +240,7 @@ impl SvgEasyApp {
                 self.view.reset();
                 cx.notify();
             }
+            "1" => self.actual_size(cx),
             "=" | "+" => {
                 self.view.zoom = (self.view.zoom * 1.25).clamp(0.05, 32.0);
                 cx.notify();
@@ -600,122 +602,245 @@ impl SvgEasyApp {
             }))
     }
 
+    /// One icon action on the toolbar.
+    ///
+    /// Icon-only and compact, so every entry is the same size and the row sits on one baseline —
+    /// the widths came out ragged when the buttons carried words of different lengths.
+    fn tool_button(
+        &self,
+        id: &'static str,
+        icon: ToolbarIcon,
+        tooltip: &'static str,
+        enabled: bool,
+        cx: &mut Context<Self>,
+        action: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Button {
+        Button::new(id)
+            .icon(icon)
+            .compact()
+            .tooltip(tooltip)
+            .disabled(!enabled)
+            .on_click(cx.listener(move |this, _, window, cx| action(this, window, cx)))
+    }
+
+    /// A toolbar button that stays pressed, for the tool group and the view toggles.
+    fn toggle_button(
+        &self,
+        id: &'static str,
+        icon: ToolbarIcon,
+        tooltip: &'static str,
+        active: bool,
+        cx: &mut Context<Self>,
+        action: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> Button {
+        Button::new(id)
+            .icon(icon)
+            .compact()
+            .tooltip(tooltip)
+            .selected(active)
+            .toggled(active)
+            .on_click(cx.listener(move |this, _, window, cx| action(this, window, cx)))
+    }
+
+    /// Zoom to 1 document unit per pixel — what the toolbar reports as 100%.
+    ///
+    /// `view.zoom` is relative to "fit", so the factor has to go through the fit scale for the
+    /// viewport this moment.
+    fn actual_size(&mut self, cx: &mut Context<Self>) {
+        if let Some(bounds) = self.bounds() {
+            let fit = canvas::view_scale(bounds, self.editor.doc_size(), 1.0);
+            self.view.zoom = (1.0 / fit).clamp(0.05, 32.0);
+            self.view.pan = point(px(0.), px(0.));
+        }
+        cx.notify();
+    }
+
+    /// The action bar.
+    ///
+    /// The order is the one the IntelliJ-side toolbar lays out (`core/EditorToolbar.kt`): the
+    /// interaction tools, then the file actions, then zoom, then the view toggles. The file,
+    /// history and delete groups are the standalone app's own — there is no IDE menu to fall back
+    /// on here — but they keep the same icon-button shape and separators.
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let title = self.editor.title();
-        let zoom = self.view.zoom;
+        // The real scale, not the fit-relative zoom, so "100%" means one unit per pixel.
+        let scale = self.mapping().map(|m| m.scale).unwrap_or(self.view.zoom);
         let can_delete = self.editor.has_selection();
         let can_undo = self.editor.can_undo();
         let can_redo = self.editor.can_redo();
+        let tool = self.view.tool;
+        let (grid, chessboard) = (self.view.grid, self.view.chessboard);
+
+        let separator = || div().w(px(1.)).h(px(18.)).mx_1().bg(rgb(0x3c3c3c));
 
         div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_2()
-            .px_3()
-            .h(px(42.))
+            .gap_1()
+            .px_2()
+            .h(px(40.))
             .bg(theme::chrome_bg())
             .child(
                 div()
+                    .px_2()
                     .text_size(px(13.))
                     .text_color(rgb(0xe6e6e6))
                     .child(title),
             )
             .child(div().flex_1())
-            .child(
-                Button::new("undo")
-                    .label("Undo")
-                    .compact()
-                    .tooltip("Step back one edit (Ctrl+Z)")
-                    .disabled(!can_undo)
-                    .on_click(cx.listener(|this, _, window, cx| this.undo(window, cx))),
-            )
-            .child(
-                Button::new("redo")
-                    .label("Redo")
-                    .compact()
-                    .tooltip("Re-apply the undone edit (Ctrl+Shift+Z)")
-                    .disabled(!can_redo)
-                    .on_click(cx.listener(|this, _, window, cx| this.redo(window, cx))),
-            )
-            .child(div().w(px(1.)).h(px(18.)).bg(rgb(0x3c3c3c)))
-            .child(
-                Button::new("new")
-                    .label("New")
-                    .compact()
-                    .tooltip("Start an empty document (Ctrl+N)")
-                    .on_click(cx.listener(|this, _, window, cx| this.request_new(window, cx))),
-            )
-            .child(
-                Button::new("open")
-                    .label("Open…")
-                    .compact()
-                    .tooltip("Open an SVG file (Ctrl+O)")
-                    .on_click(cx.listener(|this, _, window, cx| this.prompt_open(window, cx))),
-            )
-            .child(
-                Button::new("save")
-                    .label("Save")
-                    .compact()
-                    .tooltip("Write the document back to disk (Ctrl+S)")
-                    .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
-            )
-            .child(
-                Button::new("save-as")
-                    .label("Save As…")
-                    .compact()
-                    .tooltip("Write the document to a new path (Ctrl+Shift+S)")
-                    .on_click(cx.listener(|this, _, window, cx| this.prompt_save_as(window, cx))),
-            )
-            .child(div().w(px(1.)).h(px(18.)).bg(rgb(0x3c3c3c)))
-            .child(
-                Button::new("fit")
-                    .label("Fit")
-                    .compact()
-                    .tooltip("Fit the document to the window (Ctrl+0)")
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.view.reset();
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("zoom-out")
-                    .label("−")
-                    .compact()
-                    .tooltip("Zoom out (Ctrl+-)")
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.view.zoom = (this.view.zoom * 0.8).clamp(0.05, 32.0);
-                        cx.notify();
-                    })),
-            )
+            .child(self.toggle_button(
+                "tool-move",
+                ToolbarIcon::MoveTool,
+                "Move: select, drag, resize and rotate elements",
+                tool == Tool::Move,
+                cx,
+                |this, _window, cx| {
+                    this.view.tool = Tool::Move;
+                    cx.notify();
+                },
+            ))
+            .child(self.toggle_button(
+                "tool-marquee",
+                ToolbarIcon::BoxSelect,
+                "Box Select: drag a rectangle to select",
+                tool == Tool::Marquee,
+                cx,
+                |this, _window, cx| {
+                    this.view.tool = Tool::Marquee;
+                    cx.notify();
+                },
+            ))
+            .child(separator())
+            .child(self.tool_button(
+                "undo",
+                ToolbarIcon::Undo,
+                "Step back one edit (Ctrl+Z)",
+                can_undo,
+                cx,
+                |this, window, cx| this.undo(window, cx),
+            ))
+            .child(self.tool_button(
+                "redo",
+                ToolbarIcon::Redo,
+                "Re-apply the undone edit (Ctrl+Shift+Z)",
+                can_redo,
+                cx,
+                |this, window, cx| this.redo(window, cx),
+            ))
+            .child(separator())
+            .child(self.tool_button(
+                "new",
+                ToolbarIcon::New,
+                "Start an empty document (Ctrl+N)",
+                true,
+                cx,
+                |this, window, cx| this.request_new(window, cx),
+            ))
+            .child(self.tool_button(
+                "open",
+                ToolbarIcon::Open,
+                "Open an SVG file (Ctrl+O)",
+                true,
+                cx,
+                |this, window, cx| this.prompt_open(window, cx),
+            ))
+            .child(self.tool_button(
+                "save",
+                ToolbarIcon::Save,
+                "Write the document back to disk (Ctrl+S). Save As is Ctrl+Shift+S.",
+                true,
+                cx,
+                |this, window, cx| this.save(window, cx),
+            ))
+            .child(separator())
+            .child(self.tool_button(
+                "zoom-out",
+                ToolbarIcon::ZoomOut,
+                "Zoom out (Ctrl+-)",
+                true,
+                cx,
+                |this, _window, cx| {
+                    this.view.zoom = (this.view.zoom * 0.8).clamp(0.05, 32.0);
+                    cx.notify();
+                },
+            ))
+            .child(self.tool_button(
+                "zoom-in",
+                ToolbarIcon::ZoomIn,
+                "Zoom in (Ctrl+=)",
+                true,
+                cx,
+                |this, _window, cx| {
+                    this.view.zoom = (this.view.zoom * 1.25).clamp(0.05, 32.0);
+                    cx.notify();
+                },
+            ))
+            // A fixed width, so the buttons either side do not shift as the number changes.
             .child(
                 div()
+                    .w(px(44.))
+                    .flex()
+                    .justify_center()
                     .text_size(px(12.))
                     .text_color(rgb(0x9d9d9d))
-                    .child(format!("{:.0}%", zoom * 100.0)),
+                    .child(format!("{:.0}%", scale * 100.0)),
             )
-            .child(
-                Button::new("zoom-in")
-                    .label("+")
-                    .compact()
-                    .tooltip("Zoom in (Ctrl+=)")
-                    .on_click(cx.listener(|this, _, _window, cx| {
-                        this.view.zoom = (this.view.zoom * 1.25).clamp(0.05, 32.0);
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("delete")
-                    .label("Delete")
-                    .compact()
-                    .tooltip("Delete the selected elements (Del)")
-                    .disabled(!can_delete)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if this.editor.delete_selection() {
-                            this.after_document_edit(window, cx);
-                        }
-                    })),
-            )
+            .child(self.tool_button(
+                "actual-size",
+                ToolbarIcon::ActualSize,
+                "Actual size — 100%, one pixel per unit (Ctrl+1)",
+                true,
+                cx,
+                |this, _window, cx| this.actual_size(cx),
+            ))
+            .child(self.tool_button(
+                "fit",
+                ToolbarIcon::Fit,
+                "Fit the document to the window (Ctrl+0)",
+                true,
+                cx,
+                |this, _window, cx| {
+                    this.view.reset();
+                    cx.notify();
+                },
+            ))
+            .child(separator())
+            .child(self.toggle_button(
+                "grid",
+                ToolbarIcon::Grid,
+                "Show or hide the pixel grid",
+                grid,
+                cx,
+                |this, _window, cx| {
+                    this.view.grid = !this.view.grid;
+                    cx.notify();
+                },
+            ))
+            .child(self.toggle_button(
+                "chessboard",
+                ToolbarIcon::Chessboard,
+                "Show or hide the transparency chessboard",
+                chessboard,
+                cx,
+                |this, _window, cx| {
+                    this.view.chessboard = !this.view.chessboard;
+                    cx.notify();
+                },
+            ))
+            .child(separator())
+            .child(self.tool_button(
+                "delete",
+                ToolbarIcon::Delete,
+                "Delete the selected elements (Del)",
+                can_delete,
+                cx,
+                |this, window, cx| {
+                    if this.editor.delete_selection() {
+                        this.after_document_edit(window, cx);
+                    }
+                },
+            ))
     }
 }
 
