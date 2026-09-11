@@ -4,9 +4,9 @@
 use std::path::PathBuf;
 
 use gpui::{
-    AppContext as _, Bounds, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, ParentElement,
-    PathPromptOptions, Pixels, Render, Styled, Subscription, Window, div, point, prelude::*, px,
-    rgba, rgb,
+    AppContext as _, Bounds, Context, CursorStyle, Entity, FocusHandle, IntoElement, KeyDownEvent,
+    ParentElement, PathPromptOptions, Pixels, Render, Styled, Subscription, Window, div, point,
+    prelude::*, px, rgba, rgb,
 };
 use gpui_component::{
     Disableable, Selectable, h_resizable,
@@ -16,10 +16,12 @@ use gpui_component::{
     resizable_panel,
 };
 use resvg_bridge::dom::Stack;
+use resvg_bridge::optimize::{self, OptimizeOptions, OptimizeResult};
 
 use crate::canvas::{self, Mapping, Shared, Tool, View};
 use crate::document::{self, Editor as Document};
 use crate::icons::ToolbarIcon;
+use crate::svgo;
 use crate::theme;
 
 /// Width of the XML pane at startup. The divider is draggable, so this is only the initial split.
@@ -58,6 +60,11 @@ pub struct SvgEasyApp {
     /// returning `false` from `on_should_close`, so `Pending::Close` is how a close gets retried
     /// once the document is clean.
     pub pending: Option<Pending>,
+    /// The SVGO settings dialog's working copy, `Some` while the dialog is up. The dialog edits
+    /// this directly and only the file gets written on OK, so a cancel really does discard.
+    pub svgo_settings: Option<OptimizeOptions>,
+    /// The last optimisation's report, `Some` while its dialog is up.
+    pub svgo_report: Option<OptimizeResult>,
     _editor_sub: Subscription,
 }
 
@@ -108,6 +115,8 @@ impl SvgEasyApp {
             focus_handle: cx.focus_handle(),
             status: status.map(|message| (message, true)),
             pending: None,
+            svgo_settings: None,
+            svgo_report: None,
             _editor_sub: editor_sub,
         }
     }
@@ -749,6 +758,327 @@ impl SvgEasyApp {
                     }
                 },
             ))
+            // The SVGO pair sits at the far right, away from the document actions: one configures
+            // the optimiser, the other runs it. Both are about the whole file, not the selection,
+            // so nothing to their left governs whether they are available.
+            .child(separator())
+            .child(self.tool_button(
+                "svgo-settings",
+                ToolbarIcon::SvgoSettings,
+                "SVGO 设置：选择要执行的优化项",
+                true,
+                cx,
+                |this, _window, cx| this.open_svgo_settings(cx),
+            ))
+            .child(self.tool_button(
+                "svgo-run",
+                ToolbarIcon::Svgo,
+                "SVGO：优化整个文档（压缩体积，可 Ctrl+Z 撤销）",
+                true,
+                cx,
+                |this, window, cx| this.run_svgo(window, cx),
+            ))
+    }
+
+    /// Opens the SVGO settings dialog on the saved settings.
+    fn open_svgo_settings(&mut self, cx: &mut Context<Self>) {
+        self.svgo_settings = Some(svgo::load_options());
+        cx.notify();
+    }
+
+    /// Answers the SVGO settings dialog: OK persists, cancel throws the working copy away.
+    fn close_svgo_settings(&mut self, save: bool, cx: &mut Context<Self>) {
+        if let Some(options) = self.svgo_settings.take() {
+            if save {
+                svgo::save_options(&options);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Flips one pass in the settings dialog's working copy.
+    fn toggle_svgo_pass(&mut self, name: &'static str, on: bool, cx: &mut Context<Self>) {
+        if let Some(options) = self.svgo_settings.as_mut() {
+            options.passes.insert(name.to_string(), on);
+            cx.notify();
+        }
+    }
+
+    /// The SVGO action: optimise the document, put the result in the editor, then report what it
+    /// saved.
+    ///
+    /// Runs inline rather than on a background task. The engine is in-process and takes
+    /// milliseconds on ordinary artwork, so a spinner would cost more than it explains — but a
+    /// failure has to leave the document untouched, which is why the document is only replaced
+    /// once the optimiser has returned a whole new document.
+    fn run_svgo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let options = svgo::load_options();
+        match optimize::optimize(&self.editor.source, &options) {
+            Ok(result) => {
+                if self.editor.replace_source(result.svg.clone()) {
+                    self.after_document_edit(window, cx);
+                }
+                self.status = None;
+                self.svgo_report = Some(result);
+            }
+            Err(e) => self.status = Some((format!("SVGO 优化失败：{e}"), true)),
+        }
+        cx.notify();
+    }
+
+    /// The SVGO settings dialog: the engine's catalogue as checkboxes, grouped as the engine
+    /// groups it. An unchecked box means "switch this pass off" — the base is SVGO's default
+    /// preset, so the dialog only ever records exceptions.
+    fn svgo_settings_dialog(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let options = self
+            .svgo_settings
+            .as_ref()
+            .expect("only built while the dialog is up");
+
+        let mut groups: Vec<(&'static str, Vec<&'static optimize::OptimizePass>)> = Vec::new();
+        for pass in optimize::PASSES {
+            match groups.last_mut() {
+                Some((group, passes)) if *group == pass.group => passes.push(pass),
+                _ => groups.push((pass.group, vec![pass])),
+            }
+        }
+
+        let body = div()
+            .id("svgo-settings-body")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .max_h(px(420.))
+            .overflow_y_scroll()
+            .children(groups.into_iter().map(|(group, passes)| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(0x9d9d9d))
+                            .child(svgo::group_label(group)),
+                    )
+                    .children(passes.into_iter().map(|pass| {
+                        let on = options.enabled(pass.name);
+                        div()
+                            .id(pass.name)
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .px_1()
+                            .py(px(2.))
+                            .cursor(CursorStyle::PointingHand)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle_svgo_pass(pass.name, !on, cx)
+                            }))
+                            .child(
+                                div()
+                                    .w(px(14.))
+                                    .text_size(px(13.))
+                                    .text_color(if on {
+                                        theme::selection()
+                                    } else {
+                                        rgb(0x6b6b6b).into()
+                                    })
+                                    .child(if on { "✓" } else { "·" })
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .text_color(if on { rgb(0xe6e6e6) } else { rgb(0x8a8a8a) })
+                                    .child(svgo::label(pass.name, pass.label)),
+                            )
+                    }))
+            }));
+
+        modal(
+            "svgo-settings",
+            "SVGO 设置",
+            "勾选要执行的优化项。默认全部开启，与 SVGO 的 preset-default 一致。",
+            body,
+            480.0,
+            div()
+                .flex()
+                .flex_row()
+                .justify_end()
+                .gap_2()
+                .child(
+                    Button::new("svgo-settings-all")
+                        .label("全选")
+                        .compact()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            // The base is SVGO's preset, which has every pass on, so clearing the
+                            // exceptions *is* "all of them" — and doubles as "restore defaults".
+                            if let Some(options) = this.svgo_settings.as_mut() {
+                                options.passes.clear();
+                                cx.notify();
+                            }
+                        }))
+                )
+                .child(
+                    Button::new("svgo-settings-none")
+                        .label("全不选")
+                        .compact()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            // Every name is recorded as off rather than the map being "all off":
+                            // the map only ever holds exceptions, and a missing name means *on*.
+                            if let Some(options) = this.svgo_settings.as_mut() {
+                                options.passes = optimize::PASSES
+                                    .iter()
+                                    .map(|pass| (pass.name.to_string(), false))
+                                    .collect();
+                                cx.notify();
+                            }
+                        }))
+                )
+                .child(
+                    Button::new("svgo-settings-cancel")
+                        .label("取消")
+                        .compact()
+                        .on_click(cx.listener(|this, _, _, cx| this.close_svgo_settings(false, cx)))
+                )
+                .child(
+                    Button::new("svgo-settings-ok")
+                        .label("确定")
+                        .compact()
+                        .on_click(cx.listener(|this, _, _, cx| this.close_svgo_settings(true, cx)))
+                )
+        )
+    }
+
+    /// The report the SVGO action leaves behind: what the optimiser did to the file's size.
+    fn svgo_report_dialog(&self, result: &OptimizeResult, cx: &mut Context<Self>) -> impl IntoElement {
+        let saved = result.saved_bytes();
+        let headline = if saved > 0 {
+            format!("体积减少 {:.1}%", result.saved_ratio() * 100.0)
+        } else if saved == 0 {
+            "体积没有变化".to_string()
+        } else {
+            format!("体积反而增加 {}（请检查设置）", bytes(-saved))
+        };
+
+        let row = |label: &'static str, value: String, strong: bool| {
+            div()
+                .flex()
+                .flex_row()
+                .justify_between()
+                .gap_4()
+                .child(div().text_size(px(13.)).text_color(rgb(0x9d9d9d)).child(label))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(if strong { theme::selection() } else { rgb(0xe6e6e6).into() })
+                        .child(value),
+                )
+        };
+
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(row("优化前", bytes(result.before_bytes as i64), false))
+            .child(row("优化后", bytes(result.after_bytes as i64), false))
+            .child(row(
+                if saved >= 0 { "节省" } else { "增加" },
+                format!("{}（{:.1}%）", bytes(saved.abs()), result.saved_ratio().abs() * 100.0),
+                true,
+            ))
+            .child(row(
+                "执行的优化项",
+                format!("{} 项", result.passes),
+                false,
+            ));
+
+        modal(
+            "svgo-report",
+            "SVGO 优化完成",
+            &headline,
+            body,
+            400.0,
+            div()
+                .flex()
+                .flex_row()
+                .justify_end()
+                .child(
+                    Button::new("svgo-report-ok")
+                        .label("好")
+                        .compact()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.svgo_report = None;
+                            cx.notify();
+                        })),
+                ),
+        )
+    }
+}
+
+/// A modal overlay: a dimmed backdrop with a titled card in the middle.
+///
+/// The unsaved-changes prompt needs a bespoke body, so it stays hand-written in
+/// [`SvgEasyApp::unsaved_prompt`]; the two SVGO dialogs differ only in their content, and this is
+/// what keeps them from becoming three copies of the same card.
+fn modal(
+    id: &'static str,
+    title: &str,
+    subtitle: &str,
+    body: impl IntoElement,
+    width: f32,
+    buttons: impl IntoElement,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgba(0x000000a6))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .w(px(width))
+                .p_5()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(0x4a4a4a))
+                .bg(rgb(0x2d2d30))
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .text_color(rgb(0xe6e6e6))
+                        .child(title.to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(0x9d9d9d))
+                        .child(subtitle.to_string()),
+                )
+                .child(body)
+                .child(buttons),
+        )
+}
+
+/// A byte count the way a person reads one: exact below a kilobyte, one decimal above, and the
+/// unit that keeps it under four digits.
+fn bytes(n: i64) -> String {
+    const KB: f64 = 1024.0;
+    let n = n as f64;
+    if n < KB {
+        format!("{n:.0} B")
+    } else if n < KB * KB {
+        format!("{:.1} KB", n / KB)
+    } else {
+        format!("{:.1} MB", n / KB / KB)
     }
 }
 
@@ -758,6 +1088,11 @@ impl Render for SvgEasyApp {
         let canvas = self.canvas_view(cx);
         let banner = self.banner();
         let prompt = self.pending.is_some().then(|| self.unsaved_prompt(cx));
+        let svgo_settings = self.svgo_settings.is_some().then(|| self.svgo_settings_dialog(cx));
+        let svgo_report = self
+            .svgo_report
+            .as_ref()
+            .map(|report| self.svgo_report_dialog(report, cx));
 
         let right = div()
             .size_full()
@@ -817,7 +1152,9 @@ impl Render for SvgEasyApp {
                         .child(resizable_panel().child(right)),
                 ),
             )
-            // Last child, so the prompt paints over the panes.
+            // Last children, so the dialogs paint over the panes.
             .when_some(prompt, |el, prompt| el.child(prompt))
+            .when_some(svgo_settings, |el, dialog| el.child(dialog))
+            .when_some(svgo_report, |el, dialog| el.child(dialog))
     }
 }

@@ -30,7 +30,13 @@ crate-type = ["cdylib", "rlib"]
 resvg = "=0.43.0"
 usvg   = "=0.43.0"
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 base64 = "0.22"
+# The SVGO engine, in Rust: `oxvg_ast` parses/serialises, `oxvg_optimiser` is the plugin pipeline
+# behind the SVGO button in both front ends (see `optimize.rs`). Pure Rust, so the standalone app
+# gains no Node dependency and the plugin reaches it through the sidecar it already runs.
+oxvg_ast = { version = "=0.0.7", features = ["roxmltree", "selectors"] }
+oxvg_optimiser = "=0.0.7"
 
 [[bin]]
 name = "svg_easy_sidecar"

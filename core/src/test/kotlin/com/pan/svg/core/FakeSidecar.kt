@@ -16,6 +16,18 @@ open class FakeSidecar : SidecarClient(listOf("fake-sidecar")) {
 
     var commitElements: List<Map<String, Any?>> = emptyList()
 
+    /** Reply for `optimizePasses`; set to a non-list to exercise a malformed reply. */
+    var optimizePassesReply: Any? =
+        listOf(
+            linkedMapOf("name" to "removeDoctype", "label" to "Remove doctype", "group" to "Document"),
+            linkedMapOf("name" to "removeComments", "label" to "Remove comments", "group" to "Document"),
+            linkedMapOf("name" to "cleanupIds", "label" to "Cleanup ids", "group" to "Structure"),
+        )
+
+    /** Reply for `optimize`; set to a non-map to exercise a malformed reply. */
+    var optimizeReply: Any? =
+        linkedMapOf("svg" to "<svg/>", "beforeBytes" to 182L, "afterBytes" to 134L, "passes" to 34)
+
     private val pngB64 =
         Base64.getEncoder().encodeToString(
             Base64.getDecoder().decode(
@@ -64,6 +76,8 @@ open class FakeSidecar : SidecarClient(listOf("fake-sidecar")) {
                     "elements" to commitElements,
                 )
             "renderViewport" -> linkedMapOf("png" to pngB64)
+            "optimizePasses" -> optimizePassesReply
+            "optimize" -> optimizeReply
             else -> throw SidecarException("fake sidecar: unexpected method '$method'")
         }
     }

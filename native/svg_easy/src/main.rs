@@ -34,6 +34,7 @@ mod canvas;
 mod document;
 mod icons;
 mod image_conv;
+mod svgo;
 mod theme;
 
 use std::path::PathBuf;

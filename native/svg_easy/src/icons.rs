@@ -40,6 +40,10 @@ pub enum ToolbarIcon {
     Grid,
     Chessboard,
     Delete,
+    /// Configure which SVGO passes run.
+    SvgoSettings,
+    /// Run SVGO over the document.
+    Svgo,
 }
 
 impl ToolbarIcon {
@@ -60,6 +64,8 @@ impl ToolbarIcon {
             Self::Grid => include_bytes!("../assets/icons/grid.svg"),
             Self::Chessboard => include_bytes!("../assets/icons/chessboard.svg"),
             Self::Delete => include_bytes!("../assets/icons/delete.svg"),
+            Self::SvgoSettings => include_bytes!("../assets/icons/svgo-settings.svg"),
+            Self::Svgo => include_bytes!("../assets/icons/svgo.svg"),
         }
     }
 }

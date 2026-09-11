@@ -308,6 +308,58 @@ open class SidecarClient(private val command: List<String>) : AutoCloseable {
         )
     }
 
+    /**
+     * The SVGO passes the sidecar can run, in display order, as a list of [SvgoPass].
+     *
+     * Stateless like [layoutOf]: it only enumerates the engine's pass catalogue and never touches
+     * the document opened by [open]. Entries without a `name` are skipped, since the name is the
+     * pass identity that the settings and `options` maps are keyed by.
+     */
+    fun optimizePasses(): List<SvgoPass> {
+        val arr =
+            request("optimizePasses", emptyMap(), replayOnRestart = false) as? List<*>
+                ?: throw SidecarException("malformed optimizePasses reply")
+        return arr.mapNotNull { entry ->
+            val m = entry as? Map<*, *> ?: return@mapNotNull null
+            val name = m["name"] as? String ?: return@mapNotNull null
+            SvgoPass(
+                name = name,
+                label = m["label"] as? String ?: name,
+                group = m["group"] as? String ?: "",
+            )
+        }
+    }
+
+    /**
+     * Runs SVGO over [svg] with [options] (pass name -> enabled; a missing name keeps SVGO's
+     * default-on behaviour).
+     *
+     * Stateless like [layoutOf] and [renderFitRgba]: it optimizes a throw-away copy and leaves
+     * [open]'s document untouched, so the editor can offer optimization without disturbing the
+     * canvas.
+     */
+    fun optimize(
+        svg: String,
+        options: Map<String, Boolean> = emptyMap(),
+    ): SvgoResult {
+        val res =
+            reply(
+                request(
+                    "optimize",
+                    linkedMapOf("svg" to svg, "options" to options),
+                    replayOnRestart = false,
+                ),
+                "optimize",
+            )
+        val out = res["svg"] as? String ?: throw SidecarException("optimize reply missing svg")
+        return SvgoResult(
+            svg = out,
+            beforeBytes = (res["beforeBytes"] as? Number)?.toLong() ?: 0L,
+            afterBytes = (res["afterBytes"] as? Number)?.toLong() ?: 0L,
+            passes = (res["passes"] as? Number)?.toInt() ?: 0,
+        )
+    }
+
     override fun close() {
         closed = true
         synchronized(startLock) {

@@ -46,6 +46,27 @@ object SvgEasyToolbar {
         return toolbar.component
     }
 
+    /**
+     * Builds the two SVGO actions as their own small toolbar, so the host can pin them at the
+     * top-right of the editor (to the right of the size label). [enabled] lets the host reflect
+     * whether the canvas and engine are actually available, mirroring [PanelAction.update]'s use
+     * of `panel.isShowing`; it is evaluated on the EDT.
+     */
+    fun forSvgo(
+        onConfigure: () -> Unit,
+        onRun: () -> Unit,
+        enabled: () -> Boolean = { true },
+    ): JComponent {
+        val group =
+            DefaultActionGroup(
+                SvgoSettingsAction(onConfigure, enabled),
+                SvgoRunAction(onRun, enabled),
+            )
+        val toolbar =
+            ActionManager.getInstance().createActionToolbar(ActionPlaces.EDITOR_TOOLBAR, group, true)
+        return toolbar.component
+    }
+
     private abstract class PanelAction(
         protected val panel: SvgEditorPanel,
         text: String,
@@ -188,6 +209,54 @@ object SvgEasyToolbar {
 
         override fun setSelected(e: AnActionEvent, state: Boolean) {
             panel.setChessboard(state)
+        }
+    }
+
+    /**
+     * The stateless SVGO actions take callbacks rather than a panel (the optimization lives in the
+     * host, which owns the document and sidecar); [enabled] carries the availability flag so the
+     * buttons grey out while the canvas/engine is missing, like [PanelAction] does.
+     */
+    private abstract class SvgoAction(
+        text: String,
+        description: String,
+        icon: Icon,
+        private val enabled: () -> Boolean,
+    ) : AnAction(text, description, icon) {
+        override fun update(e: AnActionEvent) {
+            e.presentation.isEnabled = enabled()
+        }
+
+        override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT
+    }
+
+    private class SvgoSettingsAction(
+        private val onConfigure: () -> Unit,
+        enabled: () -> Boolean,
+    ) :
+        SvgoAction(
+            "SVGO Settings",
+            "SVGO Settings: choose which optimizations run",
+            EditorIcons.svgoSettings(),
+            enabled,
+        ) {
+        override fun actionPerformed(e: AnActionEvent) {
+            onConfigure()
+        }
+    }
+
+    private class SvgoRunAction(
+        private val onRun: () -> Unit,
+        enabled: () -> Boolean,
+    ) :
+        SvgoAction(
+            "SVGO",
+            "SVGO: optimize the current SVG",
+            EditorIcons.svgoRun(),
+            enabled,
+        ) {
+        override fun actionPerformed(e: AnActionEvent) {
+            onRun()
         }
     }
 }

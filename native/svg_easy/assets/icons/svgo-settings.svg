@@ -1,0 +1,12 @@
+<!-- Drawn for SVG Easy in the IntelliJ expui style (16x16, currentColor): three sliders, the
+     "configure" mark. A gear would need eight teeth to read as one at this size; sliders stay
+     legible and say "these settings are a list of switches", which is exactly what the SVGO
+     dialog is. -->
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<rect x="1.5" y="3" width="13" height="1" rx="0.5" fill="currentColor"/>
+<rect x="8.5" y="1.5" width="3" height="4" rx="1" fill="currentColor" stroke="currentColor"/>
+<rect x="1.5" y="7.5" width="13" height="1" rx="0.5" fill="currentColor"/>
+<rect x="4.5" y="6" width="3" height="4" rx="1" fill="currentColor" stroke="currentColor"/>
+<rect x="1.5" y="12" width="13" height="1" rx="0.5" fill="currentColor"/>
+<rect x="10.5" y="10.5" width="3" height="4" rx="1" fill="currentColor" stroke="currentColor"/>
+</svg>

@@ -1,0 +1,5 @@
+<!-- Drawn for SVG Easy in the IntelliJ expui style (16x16, currentColor): a lightning bolt, the
+     usual "run this now" mark. It is what the SVGO button does — optimise at once, no dialog. -->
+<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M9.4 1.2 3.6 8.7h3.2l-.9 6.1 5.8-7.5H8.5z" fill="currentColor"/>
+</svg>

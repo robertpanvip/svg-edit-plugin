@@ -3,6 +3,9 @@ package com.pan.svg.plugin
 import com.pan.svg.core.SidecarClient
 import com.pan.svg.core.SidecarRenderer
 import com.pan.svg.core.SvgEditorPanel
+import com.pan.svg.core.SvgoPass
+import com.pan.svg.core.showSvgoResultDialog
+import com.pan.svg.core.showSvgoSettingsDialog
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.command.WriteCommandAction
@@ -16,6 +19,7 @@ import com.intellij.openapi.fileEditor.FileEditorLocation
 import com.intellij.openapi.fileEditor.FileEditorState
 import com.intellij.openapi.fileEditor.FileEditorStateLevel
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.util.Computable
 import com.intellij.openapi.util.UserDataHolderBase
 import com.intellij.openapi.vfs.VirtualFile
@@ -25,6 +29,7 @@ import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.beans.PropertyChangeListener
 import java.util.concurrent.CopyOnWriteArrayList
+import javax.swing.BoxLayout
 import javax.swing.JComponent
 import javax.swing.JLabel
 import javax.swing.JPanel
@@ -86,6 +91,12 @@ class SvgPreviewPanel(
     /** Built on the EDT once [panel] exists. */
     private var toolbar: JComponent? = null
 
+    /** The two SVGO actions, pinned at the far right of [infoHeader]; built alongside [toolbar]. */
+    private var svgoToolbar: JComponent? = null
+
+    /** Pass catalogue from `optimizePasses`, cached after the first settings dialog. */
+    private var svgoPasses: List<SvgoPass>? = null
+
     /** Owned by this editor: closed in [dispose] (the panel only borrows it). */
     private var ownedSidecar: SidecarClient? = null
 
@@ -100,9 +111,20 @@ class SvgPreviewPanel(
             horizontalAlignment = SwingConstants.RIGHT
         }
 
-    /** Header row: native platform toolbar centred, the info label pinned to its right end. */
+    /** Header row: native platform toolbar centred, the info label + SVGO buttons at its right end. */
     private val infoHeader: JPanel =
         JPanel(BorderLayout()).apply {
+            isOpaque = false
+        }
+
+    /**
+     * Right end of [infoHeader]: [infoValue] followed by [svgoToolbar], so the two SVGO buttons
+     * land at the very top-right corner of the editor (to the right of the size label), matching
+     * the built-in image viewer's placement of its info readout.
+     */
+    private val infoRight: JPanel =
+        JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.LINE_AXIS)
             isOpaque = false
         }
 
@@ -257,6 +279,19 @@ class SvgPreviewPanel(
                         LOG.warn("preview: toolbar build failed", t)
                         toolbar = null
                     }
+                    try {
+                        svgoToolbar =
+                            SvgEasyToolbar.forSvgo(
+                                onConfigure = { configureSvgo() },
+                                onRun = { runSvgo() },
+                                // Disabled while the canvas is hidden (background tab) or the engine
+                                // is gone, mirroring PanelAction's panel.isShowing check.
+                                enabled = { panel?.isShowing == true && ownedSidecar != null },
+                            )
+                    } catch (t: Throwable) {
+                        LOG.warn("preview: SVGO toolbar build failed", t)
+                        svgoToolbar = null
+                    }
                     c.onStatus = { refreshInfo() }
                     c.onRenderError = { showParseError(it) }
                     // Parse the current document text; a malformed SVG degrades to the visible
@@ -311,8 +346,11 @@ class SvgPreviewPanel(
         root.removeAll()
         if (bar != null) {
             infoHeader.removeAll()
+            infoRight.removeAll()
+            infoRight.add(infoValue)
+            svgoToolbar?.let { infoRight.add(it) }
             infoHeader.add(bar, BorderLayout.CENTER)
-            infoHeader.add(infoValue, BorderLayout.EAST)
+            infoHeader.add(infoRight, BorderLayout.EAST)
             root.add(infoHeader, BorderLayout.NORTH)
         }
         root.add(canvas, BorderLayout.CENTER)
@@ -355,6 +393,80 @@ class SvgPreviewPanel(
             }
         } finally {
             suppressReload = false
+        }
+    }
+
+    /**
+     * Opens the SVGO settings dialog. The pass catalogue comes from the sidecar, so it is fetched
+     * off the EDT like every other RPC and cached; only the (must-be-EDT) modal dialog and the
+     * persistence run back on the EDT.
+     */
+    private fun configureSvgo() {
+        val sidecar = ownedSidecar ?: return
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val passes =
+                try {
+                    svgoPasses ?: sidecar.optimizePasses().also { svgoPasses = it }
+                } catch (t: Throwable) {
+                    LOG.warn("preview: optimizePasses failed", t)
+                    SwingUtilities.invokeLater {
+                        Messages.showErrorDialog(
+                            project,
+                            "Could not load SVGO settings: ${t.message ?: t.javaClass.simpleName}",
+                            "SVGO",
+                        )
+                    }
+                    return@executeOnPooledThread
+                }
+            SwingUtilities.invokeLater {
+                val updated =
+                    showSvgoSettingsDialog(panel, passes, SvgoSettingsStore.load())
+                        ?: return@invokeLater
+                SvgoSettingsStore.save(updated)
+            }
+        }
+    }
+
+    /**
+     * Optimizes the current document text through the stateless `optimize` RPC. The call can take
+     * tens of seconds on a large file, so it runs off the EDT; the optimized SVG is then written
+     * back through a [WriteCommandAction] (undoable in the IDE) and the outcome is reported. A
+     * failure shows an error dialog rather than bubbling out of the action.
+     */
+    private fun runSvgo() {
+        val sidecar = ownedSidecar ?: return
+        val doc = document
+        val source = doc?.text ?: fileText()
+        if (source == null) {
+            Messages.showErrorDialog(project, "There is no SVG text to optimize.", "SVGO")
+            return
+        }
+        val settings = SvgoSettingsStore.load()
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val result =
+                try {
+                    sidecar.optimize(source, settings)
+                } catch (t: Throwable) {
+                    LOG.warn("preview: SVGO optimization failed", t)
+                    SwingUtilities.invokeLater {
+                        Messages.showErrorDialog(
+                            project,
+                            "SVGO failed: ${t.message ?: t.javaClass.simpleName}",
+                            "SVGO",
+                        )
+                    }
+                    return@executeOnPooledThread
+                }
+            SwingUtilities.invokeLater {
+                if (doc != null && result.svg != source) {
+                    // No suppressReload here: the canvas still shows the pre-optimization text, so
+                    // the debounced DocumentListener reload is exactly what brings it in sync.
+                    WriteCommandAction.runWriteCommandAction(project) {
+                        doc.setText(result.svg)
+                    }
+                }
+                showSvgoResultDialog(panel, result)
+            }
         }
     }
 

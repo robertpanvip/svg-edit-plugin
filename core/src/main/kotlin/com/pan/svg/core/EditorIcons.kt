@@ -82,6 +82,37 @@ object EditorIcons {
         }
     }
 
+    /** SVGO settings: a cog/gear glyph. */
+    fun svgoSettings(): Icon = vectorIcon { g2, pen ->
+        val cx = SIZE / 2.0
+        val cy = SIZE / 2.0
+        // Eight teeth radiating from the cog body.
+        for (i in 0 until 8) {
+            val a = i * Math.PI / 4.0
+            val dx = kotlin.math.cos(a)
+            val dy = kotlin.math.sin(a)
+            stroke(g2, pen, cx + dx * 2.8, cy + dy * 2.8, cx + dx * 5.6, cy + dy * 5.6, 1.8)
+        }
+        g2.color = pen
+        g2.stroke = BasicStroke(1.4f)
+        g2.drawOval(round(cx - 3.2), round(cy - 3.2), round(6.4), round(6.4))
+        g2.fillOval(round(cx - 1.1), round(cy - 1.1), round(2.2), round(2.2))
+    }
+
+    /** SVGO run: a lightning bolt (optimize / speed up). */
+    fun svgoRun(): Icon = vectorIcon { g2, pen ->
+        val bolt = Path2D.Double()
+        bolt.moveTo(9.5, 1.5)
+        bolt.lineTo(4.5, 8.8)
+        bolt.lineTo(7.6, 8.8)
+        bolt.lineTo(6.5, 14.5)
+        bolt.lineTo(11.5, 7.2)
+        bolt.lineTo(8.4, 7.2)
+        bolt.closePath()
+        g2.color = pen
+        g2.fill(bolt)
+    }
+
     private fun vectorIcon(body: (Graphics2D, Color) -> Unit): Icon =
         object : Icon {
             override fun getIconWidth(): Int = SIZE

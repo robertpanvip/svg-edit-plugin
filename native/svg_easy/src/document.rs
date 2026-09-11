@@ -384,6 +384,27 @@ impl Editor {
         true
     }
 
+    /// Replaces the whole document with `text` — how the SVGO action lands its result.
+    ///
+    /// Deliberately not [`Self::set_source`], which records a *text* edit and so can merge into the
+    /// previous undo step when the user presses the button right after typing. An optimisation is
+    /// its own edit: one Ctrl+Z must put the unoptimised document back, whole.
+    ///
+    /// The selection is dropped rather than carried over: node ids are indices in document order,
+    /// and the optimiser merges and removes elements, so a surviving id would quietly come to mean
+    /// a different shape. The undo snapshot holds the old selection, so Ctrl+Z brings it back.
+    pub fn replace_source(&mut self, text: String) -> bool {
+        if text == self.source {
+            return false;
+        }
+        let before = self.snapshot();
+        self.selection.clear();
+        self.source = text;
+        self.record_structural(before);
+        self.reparse();
+        true
+    }
+
     /// True while the document differs from the last saved (or loaded) state.
     pub fn dirty(&self) -> bool {
         self.source != self.saved_source

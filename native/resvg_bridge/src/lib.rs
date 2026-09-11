@@ -23,6 +23,7 @@
 
 pub mod dom;
 pub mod geom;
+pub mod optimize;
 pub mod pick;
 pub mod session;
 

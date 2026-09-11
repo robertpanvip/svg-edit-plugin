@@ -35,6 +35,14 @@
 //! - `renderFit` `{svg,vw?,vh?}` → `{rgba,w,h}` — base64 **premultiplied RGBA8**, uniformly
 //!   scaled to fit inside `(vw,vh)`; the same geometry the cdylib's `svg_render_rgba_bytes` had
 //!
+//! SVGO (also stateless, so the IDE's SVGO action never disturbs the open document):
+//!
+//! - `optimizePasses` → `[{name,label,group}]` — the catalogue the settings dialog lists, so the
+//!   Kotlin side renders the options without a second copy of the engine's field layout
+//! - `optimize` `{svg,options?}` → `{svg,beforeBytes,afterBytes,passes}` — `options` is
+//!   `{pluginName: bool}` and only needs to carry the ones switched OFF; a name it omits keeps
+//!   SVGO's default (on). Reports the input and output byte counts for the result dialog.
+//!
 //! Any panic inside a handler is caught and turned into an `error` response so
 //! a single bad request never takes the process (and thus the IDE session) down.
 
@@ -43,6 +51,7 @@ use std::io::{self, BufRead, Write};
 use serde_json::{json, Value};
 
 use resvg_bridge::geom::Mat;
+use resvg_bridge::optimize::{self, OptimizeOptions};
 use resvg_bridge::session::{base64_png, layout_of, render_fit_rgba, Session};
 
 const PROTOCOL: u32 = 1;
@@ -173,6 +182,28 @@ fn dispatch(session: &mut Option<Session>, method: &str, p: &Value) -> Result<Va
             let (vw, vh) = dims(p);
             let (rgba, w, h) = render_fit_rgba(svg, vw, vh)?;
             Ok(json!({ "rgba": base64_png(&rgba), "w": w, "h": h }))
+        }
+        "optimizePasses" => Ok(Value::Array(
+            optimize::PASSES
+                .iter()
+                .map(|pass| json!({ "name": pass.name, "label": pass.label, "group": pass.group }))
+                .collect(),
+        )),
+        "optimize" => {
+            let svg = p.get("svg").and_then(Value::as_str).ok_or("missing svg")?;
+            // Absent or null `options` means "the stock preset": nothing switched off.
+            let options: OptimizeOptions = match p.get("options") {
+                Some(value) if !value.is_null() => serde_json::from_value(value.clone())
+                    .map_err(|e| format!("bad options: {e}"))?,
+                _ => OptimizeOptions::default(),
+            };
+            let result = optimize::optimize(svg, &options)?;
+            Ok(json!({
+                "svg": result.svg,
+                "beforeBytes": result.before_bytes,
+                "afterBytes": result.after_bytes,
+                "passes": result.passes,
+            }))
         }
         other => Err(format!("unknown method '{other}'")),
     }
