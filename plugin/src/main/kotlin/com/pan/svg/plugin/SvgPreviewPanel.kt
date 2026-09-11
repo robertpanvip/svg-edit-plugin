@@ -168,8 +168,7 @@ class SvgPreviewPanel(
 
     init {
         // Give the split panes a meaningful initial extent, so the preview isn't squeezed to
-        // zero width inside TextEditorWithPreview's splitter (the tool-window path uses a
-        // BorderLayout holder and always has room, which is why only the tab looked blank).
+        // zero width inside TextEditorWithPreview's splitter (which is why the tab looked blank).
         root.preferredSize = Dimension(480, 360)
         root.minimumSize = Dimension(200, 120)
         showLoading()

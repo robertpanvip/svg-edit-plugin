@@ -9,9 +9,6 @@
     <depends>com.intellij.modules.platform</depends>
 
     <extensions defaultExtensionNs="com.intellij">
-        <toolWindow id="SVG Editor"
-                    anchor="right"
-                    factoryClass="com.pan.svg.plugin.SvgEditorToolWindowFactory"/>
         <fileEditorProvider implementation="com.pan.svg.plugin.SvgPreviewEditorProvider"
                             order="last"/>
         <postStartupActivity implementation="com.pan.svg.plugin.SvgNativePreloader"/>
