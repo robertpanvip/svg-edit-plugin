@@ -93,8 +93,8 @@ class SvgEditorToolWindowFactory : ToolWindowFactory {
 
     private fun loadingLabel(): JComponent =
         JLabel(
-            "<html><div style=\"text-align:center\">Loading SvgEasy…<br>" +
-                "<span style=\"color:#888888\">preparing the native renderer</span></div></html>",
+            "<html><div style=\"text-align:center\">SvgEasy 正在初始化…<br>" +
+                "<span style=\"color:#888888\">首次使用需加载原生渲染引擎</span></div></html>",
         ).apply {
             horizontalAlignment = SwingConstants.CENTER
             verticalAlignment = SwingConstants.CENTER

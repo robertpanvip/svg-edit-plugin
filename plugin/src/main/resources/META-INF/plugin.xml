@@ -14,6 +14,7 @@
                     factoryClass="com.pan.svg.plugin.SvgEditorToolWindowFactory"/>
         <fileEditorProvider implementation="com.pan.svg.plugin.SvgPreviewEditorProvider"
                             order="last"/>
+        <postStartupActivity implementation="com.pan.svg.plugin.SvgNativePreloader"/>
     </extensions>
 
     <actions>
