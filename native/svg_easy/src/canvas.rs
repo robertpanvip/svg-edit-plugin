@@ -28,6 +28,7 @@ use gpui::{
     MouseMoveEvent, MouseUpEvent, ParentElement, PathBuilder, Pixels, Point, RenderImage,
     ScrollWheelEvent, Styled, Window, canvas, div, point, prelude::*, px, size,
 };
+use gpui_component::menu::ContextMenuExt;
 use resvg_bridge::geom::Mat;
 use resvg_bridge::session::{DragLayers, render_scaled_rgba};
 
@@ -857,7 +858,7 @@ impl SvgEasyApp {
         )
         .size_full();
 
-        div()
+        let canvas = div()
             .size_full()
             .bg(theme::canvas_bg())
             // Focusable so Delete / Escape / Ctrl+S land here after a click.
@@ -867,7 +868,16 @@ impl SvgEasyApp {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_canvas_up))
             .on_scroll_wheel(cx.listener(Self::on_canvas_wheel))
             .on_key_down(cx.listener(Self::on_canvas_key))
-            .child(raster)
+            .child(raster);
+
+        // The stack moves act on one element, so the menu is only attached when exactly one is
+        // selected: a right-click with nothing (or several things) selected gets no menu at all,
+        // rather than one whose every entry would be inert.
+        if self.editor.selection.len() == 1 {
+            canvas.context_menu(self.restack_menu(cx)).into_any_element()
+        } else {
+            canvas.into_any_element()
+        }
     }
 
     /// Pre-renders the background/ghost pair for the drag that is starting, so the shape can

@@ -19,7 +19,7 @@ use resvg_bridge::session::{DragLayers, Session};
 
 /// Opened when the app starts with no file argument, so it is never showing an empty window.
 pub const DEFAULT_DOC: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
-<!-- SVG Easy: drag a shape to move it, or edit the source on the left -->
+<!-- SVG Easy：拖动图形即可移动，或在左侧编辑源码 -->
 <svg xmlns="http://www.w3.org/2000/svg" width="420" height="280" viewBox="0 0 420 280">
   <rect id="card" x="24" y="24" width="180" height="120" rx="16" fill="#4f46e5"/>
   <circle id="dot" cx="318" cy="92" r="62" fill="#22c55e"/>
@@ -68,15 +68,6 @@ struct Snapshot {
     selection: Vec<usize>,
 }
 
-/// One row of the layer panel.
-pub struct Layer {
-    pub node_id: usize,
-    /// The element's `#id`, or its tag when it has none.
-    pub label: String,
-    /// How deep the element sits in the tree, for indenting the row.
-    pub depth: usize,
-}
-
 /// How many undo steps are remembered. Deep enough for a session's worth of edits, bounded so a
 /// long-lived editor cannot grow without limit.
 const HISTORY_LIMIT: usize = 200;
@@ -110,7 +101,7 @@ impl Editor {
                 Ok(source) => (Self::new(source, Some(p)), None),
                 Err(e) => (
                     Self::new(DEFAULT_DOC.to_string(), None),
-                    Some(format!("could not open {}: {e} — showing the sample", p.display())),
+                    Some(format!("无法打开 {}：{e} —— 已显示示例文档", p.display())),
                 ),
             },
             None => (Self::new(DEFAULT_DOC.to_string(), None), None),
@@ -189,7 +180,7 @@ impl Editor {
         let session = self
             .session
             .as_ref()
-            .ok_or_else(|| "there is no document to drag in".to_string())?;
+            .ok_or_else(|| "当前没有可拖动的文档".to_string())?;
         session.drag_layers_rgba(nodes, scale)
     }
 
@@ -355,38 +346,6 @@ impl Editor {
         }
     }
 
-    /// The document's elements in paint order with the topmost first — the order a layer panel
-    /// reads in, and the reverse of the order the source lists them in.
-    pub fn layers(&self) -> Vec<Layer> {
-        let Some(session) = self.session.as_ref() else {
-            return Vec::new();
-        };
-        let layout = session.layout_json();
-        let mut layers: Vec<Layer> = layout["elements"]
-            .as_array()
-            .map(|elements| {
-                elements
-                    .iter()
-                    .filter_map(|e| {
-                        let node_id = e["nodeId"].as_u64()? as usize;
-                        let tag = e["tag"].as_str()?;
-                        let label = match e["id"].as_str() {
-                            Some(id) => format!("#{id}"),
-                            None => format!("<{tag}>"),
-                        };
-                        Some(Layer {
-                            node_id,
-                            label,
-                            depth: e["depth"].as_u64().unwrap_or(0) as usize,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        layers.reverse();
-        layers
-    }
-
     /// Restacks the selected element among its siblings, as one undo step.
     ///
     /// Only a single selection has a stack position to speak of: with several elements picked
@@ -512,14 +471,14 @@ impl Editor {
         let path = self
             .path
             .clone()
-            .ok_or_else(|| "this document has no file yet".to_string())?;
+            .ok_or_else(|| "此文档还没有保存到文件".to_string())?;
         self.save_as(path)
     }
 
     /// Writes the document to `path` and adopts it as the current file.
     pub fn save_as(&mut self, path: PathBuf) -> Result<PathBuf, String> {
         fs::write(&path, &self.source)
-            .map_err(|e| format!("could not save {}: {e}", path.display()))?;
+            .map_err(|e| format!("无法保存 {}：{e}", path.display()))?;
         self.path = Some(path.clone());
         self.saved_source = self.source.clone();
         Ok(path)
@@ -543,17 +502,17 @@ impl Editor {
             .as_ref()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "untitled.svg".to_string())
+            .unwrap_or_else(|| "未命名.svg".to_string())
     }
 
-    /// Window title: file name (or `untitled`), with a marker while there are unsaved changes.
+    /// Window title: file name (or `未命名`), with a marker while there are unsaved changes.
     pub fn title(&self) -> String {
         let name = self
             .path
             .as_deref()
             .and_then(Path::file_name)
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "untitled".to_string());
+            .unwrap_or_else(|| "未命名".to_string());
         if self.dirty() {
             format!("{name} •")
         } else {
@@ -628,7 +587,7 @@ mod tests {
         assert!((after[0][1] - before[0][1] - 4.0).abs() < 0.01);
         // The edit landed in the source text, and the untouched parts are verbatim.
         assert!(e.source.contains("transform=\"translate(10 4)\""));
-        assert!(e.source.contains("<!-- SVG Easy: drag a shape"));
+        assert!(e.source.contains("<!-- SVG Easy：拖动图形"));
         assert!(e.dirty());
         // …and the edited text still parses.
         assert!(e.parse_error.is_none());
@@ -771,7 +730,7 @@ mod tests {
         let mut e = editor();
         // A never-saved document must not silently invent a filename.
         assert!(e.save().is_err());
-        assert_eq!(e.suggested_file_name(), "untitled.svg");
+        assert_eq!(e.suggested_file_name(), "未命名.svg");
 
         e.select_only(e.hit(60.0, 60.0, 2.0).unwrap());
         assert!(e.translate_selection(3.0, 0.0));
@@ -789,31 +748,15 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    #[test]
-    fn layers_list_the_topmost_element_first() {
-        let mut e = editor();
-        let layers = e.layers();
-        let labels: Vec<&str> = layers.iter().map(|l| l.label.as_str()).collect();
-        // The source draws `card` first and the three `bar`s last, so `bar-c` is on top and heads
-        // the list while `card` — painted first — ends it.
-        assert_eq!(labels.first(), Some(&"#bar-c"));
-        assert_eq!(labels.last(), Some(&"#card"));
-        assert_eq!(labels.len(), 6, "card, dot, bars and its three children");
-
-        // Selecting an element does not change the listing…
-        let card = e.hit(60.0, 60.0, 2.0).expect("card must be hit");
-        e.select_only(card);
-        assert_eq!(e.layers().len(), layers.len());
-        // …and the nesting depth comes through for the indentation.
-        let depth = |e: &Editor, id: usize| {
-            e.layers()
-                .into_iter()
-                .find(|l| l.node_id == id)
-                .map(|l| l.depth)
-        };
-        assert_eq!(depth(&e, card), Some(1), "card sits directly under <svg>");
-        let bar = e.hit(84.0, 200.0, 2.0).expect("bar-a must be hit");
-        assert_eq!(depth(&e, bar), Some(2), "the bars are inside the group");
+    /// The `id` of the element the source writes last — the one that paints on top.
+    ///
+    /// Paint order *is* source order in an SVG, so the source is where to read it: the layer
+    /// panel that used to report it is gone.
+    fn topmost(source: &str) -> Option<&str> {
+        source
+            .rmatch_indices("id=\"")
+            .next()
+            .and_then(|(at, _)| source[at + "id=\"".len()..].split('"').next())
     }
 
     #[test]
@@ -822,14 +765,13 @@ mod tests {
         let card = e.hit(60.0, 60.0, 2.0).expect("card must be hit");
         e.select_only(card);
         let before = e.source.clone();
-        let top = |e: &Editor| e.layers().first().map(|l| l.node_id);
-        assert_eq!(top(&e), Some(7), "bar-c paints last");
+        assert_eq!(topmost(&e.source), Some("bar-c"), "bar-c paints last");
 
         // `card` is painted first, so bringing it to the front moves it behind every sibling.
         assert!(e.restack_selection(Stack::Front), "card jumps to the top");
         assert_ne!(e.source, before);
         assert!(e.source.find("id=\"card\"").unwrap() > e.source.find("id=\"dot\"").unwrap());
-        assert_eq!(top(&e), Some(card), "card paints last now");
+        assert_eq!(topmost(&e.source), Some("card"), "card paints last now");
         assert!(
             e.source.contains("rx=\"16\" fill=\"#4f46e5\"/>"),
             "a restack must not disturb the element itself",
@@ -839,7 +781,7 @@ mod tests {
         assert!(e.dirty());
         assert!(e.undo());
         assert_eq!(e.source, before, "undo restores the source verbatim");
-        assert_eq!(top(&e), Some(7));
+        assert_eq!(topmost(&e.source), Some("bar-c"));
 
         // Nothing to do at the end of the stack, and nothing to do without a selection.
         assert!(!e.restack_selection(Stack::Back), "already at the bottom");

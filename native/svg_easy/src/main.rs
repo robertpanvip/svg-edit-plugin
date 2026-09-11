@@ -45,6 +45,7 @@ use gpui_component::highlighter::{LanguageConfig, LanguageRegistry};
 use gpui_platform::application;
 
 use app::SvgEasyApp;
+use icons::app_icon;
 
 /// Cancels the text area's own undo/redo bindings so the *document* history owns the keystrokes.
 ///
@@ -97,6 +98,7 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                icon: app_icon(),
                 ..Default::default()
             },
             move |window, cx| {
@@ -105,7 +107,7 @@ fn main() {
                 cx.new(|cx| gpui_component::Root::new(view, window, cx))
             },
         )
-        .expect("failed to open the editor window");
+        .expect("无法打开编辑器窗口");
 
         cx.activate(true);
     });

@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+    <defs>
+        <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#4D8DFF"/>
+            <stop offset="1" stop-color="#1FA8E8"/>
+        </linearGradient>
+        <linearGradient id="glass" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.35"/>
+            <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+        </linearGradient>
+    </defs>
+
+    <!-- Rounded tile -->
+    <rect x="6" y="6" width="244" height="244" rx="56" fill="url(#bg)"/>
+    <rect x="6" y="6" width="244" height="122" rx="56" fill="url(#glass)"/>
+
+    <!-- Bezier path being edited (topmost visual layer) -->
+    <path d="M54 176 C 70 118, 102 86, 131 118 C 157 147, 176 128, 202 77"
+          fill="none" stroke="#FFFFFF" stroke-width="17" stroke-linecap="round" opacity="0.95"/>
+
+    <!-- Anchor nodes: square markers, the middle one is the "selected" filled node -->
+    <rect x="35" y="157" width="38" height="38" rx="9"
+          fill="#FFFFFF" stroke="#2E6FD8" stroke-width="8"/>
+    <rect x="112" y="99" width="38" height="38" rx="9"
+          fill="#2E6FD8" stroke="#FFFFFF" stroke-width="9"/>
+    <rect x="183" y="58" width="38" height="38" rx="9"
+          fill="#FFFFFF" stroke="#2E6FD8" stroke-width="8"/>
+</svg>

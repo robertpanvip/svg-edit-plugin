@@ -4,29 +4,26 @@
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, AppContext as _, Bounds, Context, Entity, FocusHandle, IntoElement, KeyDownEvent,
-    ParentElement, PathPromptOptions, Pixels, Render, Styled, Subscription, Window, div, point,
-    prelude::*, px, rgba, rgb,
+    AppContext as _, Bounds, Context, Entity, FocusHandle, IntoElement, KeyDownEvent, ParentElement,
+    PathPromptOptions, Pixels, Render, Styled, Subscription, Window, div, point, prelude::*, px,
+    rgba, rgb,
 };
 use gpui_component::{
     Disableable, Selectable, h_resizable,
     button::Button,
     input::{Editor, EditorState, InputEvent},
+    menu::{PopupMenu, PopupMenuItem},
     resizable_panel,
 };
 use resvg_bridge::dom::Stack;
 
 use crate::canvas::{self, Mapping, Shared, Tool, View};
-use crate::document::{self, Editor as Document, Layer};
+use crate::document::{self, Editor as Document};
 use crate::icons::ToolbarIcon;
 use crate::theme;
 
-/// Width of the layer panel at startup. The divider is draggable, so this is only the initial split.
-const LAYER_PANE_WIDTH: f32 = 220.0;
 /// Width of the XML pane at startup. The divider is draggable, so this is only the initial split.
 const XML_PANE_WIDTH: f32 = 520.0;
-/// Indentation per level of nesting in the layer list.
-const LAYER_INDENT: f32 = 12.0;
 
 /// Something the user asked for that cannot go ahead while the document has unsaved changes.
 ///
@@ -142,7 +139,7 @@ impl SvgEasyApp {
             return;
         }
         self.status = Some(match self.editor.save() {
-            Ok(path) => (format!("saved {}", path.display()), false),
+            Ok(path) => (format!("已保存 {}", path.display()), false),
             Err(e) => (e, true),
         });
         cx.notify();
@@ -292,7 +289,7 @@ impl SvgEasyApp {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Open SVG".into()),
+            prompt: Some("打开 SVG".into()),
         });
 
         cx.spawn_in(window, async move |this, cx| {
@@ -302,8 +299,8 @@ impl SvgEasyApp {
                     None => Ok(None),
                 },
                 Ok(Ok(None)) => Ok(None), // cancelled
-                Ok(Err(e)) => Err(format!("could not show the file picker: {e}")),
-                Err(_) => Err("the file picker closed unexpectedly".to_string()),
+                Ok(Err(e)) => Err(format!("无法打开文件选择器：{e}")),
+                Err(_) => Err("文件选择器意外关闭".to_string()),
             };
             this.update_in(cx, |this, window, cx| this.apply_open(outcome, window, cx))
                 .ok();
@@ -349,15 +346,15 @@ impl SvgEasyApp {
             let outcome = match receiver.await {
                 Ok(Ok(Some(path))) => Ok(Some(path)),
                 Ok(Ok(None)) => Ok(None), // cancelled
-                Ok(Err(e)) => Err(format!("could not show the save dialog: {e}")),
-                Err(_) => Err("the save dialog closed unexpectedly".to_string()),
+                Ok(Err(e)) => Err(format!("无法打开保存对话框：{e}")),
+                Err(_) => Err("保存对话框意外关闭".to_string()),
             };
             this.update_in(cx, |this, window, cx| {
                 match outcome {
                     Ok(None) => {}
                     Ok(Some(path)) => {
                         this.status = Some(match this.editor.save_as(path) {
-                            Ok(path) => (format!("saved {}", path.display()), false),
+                            Ok(path) => (format!("已保存 {}", path.display()), false),
                             Err(e) => (e, true),
                         });
                         // "Save" in the unsaved-changes prompt had no file to write to; now it does.
@@ -391,7 +388,7 @@ impl SvgEasyApp {
     /// transient message. The bool marks "this is an error".
     fn banner(&self) -> Option<(String, bool)> {
         if let Some(err) = self.editor.parse_error.as_ref() {
-            return Some((format!("XML error — showing the last valid render: {err}"), true));
+            return Some((format!("XML 错误 —— 当前显示的是最后一次成功渲染：{err}"), true));
         }
         self.status.clone()
     }
@@ -424,13 +421,13 @@ impl SvgEasyApp {
                         div()
                             .text_size(px(14.))
                             .text_color(rgb(0xe6e6e6))
-                            .child(format!("{} has unsaved changes.", self.editor.title())),
+                            .child(format!("{} 有未保存的更改。", self.editor.title())),
                     )
                     .child(
                         div()
                             .text_size(px(12.))
                             .text_color(rgb(0x9d9d9d))
-                            .child("Save them before continuing?"),
+                            .child("是否先保存再继续？"),
                     )
                     .child(
                         div()
@@ -440,7 +437,7 @@ impl SvgEasyApp {
                             .gap_2()
                             .child(
                                 Button::new("prompt-cancel")
-                                    .label("Cancel")
+                                    .label("取消")
                                     .compact()
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.resolve(Choice::Cancel, window, cx)
@@ -448,16 +445,16 @@ impl SvgEasyApp {
                             )
                             .child(
                                 Button::new("prompt-discard")
-                                    .label("Discard")
+                                    .label("不保存")
                                     .compact()
-                                    .tooltip("Throw the unsaved changes away")
+                                    .tooltip("放弃未保存的更改")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.resolve(Choice::Discard, window, cx)
                                     })),
                             )
                             .child(
                                 Button::new("prompt-save")
-                                    .label("Save")
+                                    .label("保存")
                                     .compact()
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.resolve(Choice::Save, window, cx)
@@ -467,139 +464,38 @@ impl SvgEasyApp {
             )
     }
 
-    /// The layer panel: every element in the document, topmost first, with the restack buttons.
+    /// The canvas's right-click menu: the four stack moves for the selected element.
     ///
-    /// Paint order runs the other way round from the source — the last element written is drawn on
-    /// top — so the list is reversed, the way every layer panel reads.
-    fn layers_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let selection = self.editor.selection.clone();
-        // A restack moves *one* element to a slot, so it needs exactly one selected.
-        let restackable = selection.len() == 1;
-
-        // Built eagerly: the listeners borrow the context, and `restack_button` below needs it back.
-        let rows: Vec<AnyElement> = self
-            .editor
-            .layers()
-            .into_iter()
-            .map(|layer| {
-                let Layer {
-                    node_id,
-                    label,
-                    depth,
-                } = layer;
-                let selected = selection.contains(&node_id);
-                div()
-                    .id(("layer", node_id))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .h(px(22.))
-                    .w_full()
-                    .pl(px(6.0 + depth as f32 * LAYER_INDENT))
-                    .pr_2()
-                    .text_size(px(12.))
-                    .text_color(if selected {
-                        rgb(0xffffff)
-                    } else {
-                        rgb(0xcfcfcf)
-                    })
-                    .when(selected, |el| el.bg(theme::selection()))
-                    .child(label)
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.editor.select_only(node_id);
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            })
-            .collect();
-
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(theme::chrome_bg())
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .text_size(px(12.))
-                    .text_color(rgb(0x9d9d9d))
-                    .child("Layers"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .pb_2()
-                    .child(self.restack_button(
-                        "layer-front",
-                        "Front",
-                        "Paint the element last, over its siblings",
-                        Stack::Front,
-                        restackable,
-                        cx,
-                    ))
-                    .child(self.restack_button(
-                        "layer-forward",
-                        "Up",
-                        "Move the element one step up the stack",
-                        Stack::Forward,
-                        restackable,
-                        cx,
-                    ))
-                    .child(self.restack_button(
-                        "layer-backward",
-                        "Down",
-                        "Move the element one step down the stack",
-                        Stack::Backward,
-                        restackable,
-                        cx,
-                    ))
-                    .child(self.restack_button(
-                        "layer-back",
-                        "Back",
-                        "Paint the element first, behind its siblings",
-                        Stack::Back,
-                        restackable,
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .id("layer-list")
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .px_1()
-                    .overflow_y_scroll()
-                    .children(rows),
-            )
-    }
-
-    /// One of the four restack buttons, wired to [`Document::restack_selection`].
-    fn restack_button(
+    /// These used to be a permanent "Layers" panel down the left. The panel spent a column of
+    /// width listing every element in the document, when the only question anyone asks of that
+    /// list is *"put this one in front of that one"* — and that question is always asked about
+    /// the element already under the pointer. So the list is gone and the four moves live where
+    /// the pointer is.
+    pub fn restack_menu(
         &self,
-        id: &'static str,
-        label: &'static str,
-        tooltip: &'static str,
-        to: Stack,
-        enabled: bool,
         cx: &mut Context<Self>,
-    ) -> Button {
-        Button::new(id)
-            .label(label)
-            .compact()
-            .tooltip(tooltip)
-            .disabled(!enabled)
-            .on_click(cx.listener(move |this, _, window, cx| {
-                if this.editor.restack_selection(to) {
-                    this.after_document_edit(window, cx);
-                }
-            }))
+    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        let view = cx.weak_entity();
+        move |menu, _window, _cx| {
+            [
+                ("置顶", Stack::Front),
+                ("上移一层", Stack::Forward),
+                ("下移一层", Stack::Backward),
+                ("置底", Stack::Back),
+            ]
+            .into_iter()
+            .fold(menu, |menu, (label, to)| {
+                let view = view.clone();
+                menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                    view.update(cx, |this, cx| {
+                        if this.editor.restack_selection(to) {
+                            this.after_document_edit(window, cx);
+                        }
+                    })
+                    .ok();
+                }))
+            })
+        }
     }
 
     /// One icon action on the toolbar.
@@ -692,7 +588,7 @@ impl SvgEasyApp {
             .child(self.toggle_button(
                 "tool-move",
                 ToolbarIcon::MoveTool,
-                "Move: select, drag, resize and rotate elements",
+                "移动：选择、拖动、缩放和旋转元素",
                 tool == Tool::Move,
                 cx,
                 |this, _window, cx| {
@@ -703,7 +599,7 @@ impl SvgEasyApp {
             .child(self.toggle_button(
                 "tool-marquee",
                 ToolbarIcon::BoxSelect,
-                "Box Select: drag a rectangle to select",
+                "框选：拖出矩形来选中元素",
                 tool == Tool::Marquee,
                 cx,
                 |this, _window, cx| {
@@ -715,7 +611,7 @@ impl SvgEasyApp {
             .child(self.tool_button(
                 "undo",
                 ToolbarIcon::Undo,
-                "Step back one edit (Ctrl+Z)",
+                "撤销上一步编辑（Ctrl+Z）",
                 can_undo,
                 cx,
                 |this, window, cx| this.undo(window, cx),
@@ -723,7 +619,7 @@ impl SvgEasyApp {
             .child(self.tool_button(
                 "redo",
                 ToolbarIcon::Redo,
-                "Re-apply the undone edit (Ctrl+Shift+Z)",
+                "重做已撤销的编辑（Ctrl+Shift+Z）",
                 can_redo,
                 cx,
                 |this, window, cx| this.redo(window, cx),
@@ -732,7 +628,7 @@ impl SvgEasyApp {
             .child(self.tool_button(
                 "new",
                 ToolbarIcon::New,
-                "Start an empty document (Ctrl+N)",
+                "新建空白文档（Ctrl+N）",
                 true,
                 cx,
                 |this, window, cx| this.request_new(window, cx),
@@ -740,7 +636,7 @@ impl SvgEasyApp {
             .child(self.tool_button(
                 "open",
                 ToolbarIcon::Open,
-                "Open an SVG file (Ctrl+O)",
+                "打开 SVG 文件（Ctrl+O）",
                 true,
                 cx,
                 |this, window, cx| this.prompt_open(window, cx),
@@ -748,7 +644,7 @@ impl SvgEasyApp {
             .child(self.tool_button(
                 "save",
                 ToolbarIcon::Save,
-                "Write the document back to disk (Ctrl+S). Save As is Ctrl+Shift+S.",
+                "把文档写回磁盘（Ctrl+S），另存为 Ctrl+Shift+S",
                 true,
                 cx,
                 |this, window, cx| this.save(window, cx),
@@ -757,7 +653,7 @@ impl SvgEasyApp {
             .child(self.tool_button(
                 "zoom-out",
                 ToolbarIcon::ZoomOut,
-                "Zoom out (Ctrl+-)",
+                "缩小（Ctrl+-）",
                 true,
                 cx,
                 |this, _window, cx| {
@@ -768,7 +664,7 @@ impl SvgEasyApp {
             .child(self.tool_button(
                 "zoom-in",
                 ToolbarIcon::ZoomIn,
-                "Zoom in (Ctrl+=)",
+                "放大（Ctrl+=）",
                 true,
                 cx,
                 |this, _window, cx| {
@@ -789,7 +685,7 @@ impl SvgEasyApp {
             .child(self.tool_button(
                 "actual-size",
                 ToolbarIcon::ActualSize,
-                "Actual size — 100%, one pixel per unit (Ctrl+1)",
+                "实际大小 —— 100%，一单位一像素（Ctrl+1）",
                 true,
                 cx,
                 |this, _window, cx| this.actual_size(cx),
@@ -797,7 +693,7 @@ impl SvgEasyApp {
             .child(self.tool_button(
                 "fit",
                 ToolbarIcon::Fit,
-                "Fit the document to the window (Ctrl+0)",
+                "让文档适应窗口（Ctrl+0）",
                 true,
                 cx,
                 |this, _window, cx| {
@@ -809,7 +705,7 @@ impl SvgEasyApp {
             .child(self.toggle_button(
                 "grid",
                 ToolbarIcon::Grid,
-                "Show or hide the pixel grid",
+                "显示或隐藏像素网格",
                 grid,
                 cx,
                 |this, _window, cx| {
@@ -820,7 +716,7 @@ impl SvgEasyApp {
             .child(self.toggle_button(
                 "chessboard",
                 ToolbarIcon::Chessboard,
-                "Show or hide the transparency chessboard",
+                "显示或隐藏透明棋盘格",
                 chessboard,
                 cx,
                 |this, _window, cx| {
@@ -832,7 +728,7 @@ impl SvgEasyApp {
             .child(self.tool_button(
                 "delete",
                 ToolbarIcon::Delete,
-                "Delete the selected elements (Del)",
+                "删除选中的元素（Del）",
                 can_delete,
                 cx,
                 |this, window, cx| {
@@ -895,11 +791,6 @@ impl Render for SvgEasyApp {
             .child(
                 div().flex_1().min_h(px(0.)).child(
                     h_resizable("svg-easy-split")
-                        .child(
-                            resizable_panel()
-                                .size(px(LAYER_PANE_WIDTH))
-                                .child(self.layers_panel(cx)),
-                        )
                         .child(
                             resizable_panel()
                                 .size(px(XML_PANE_WIDTH))

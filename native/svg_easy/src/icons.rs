@@ -10,8 +10,14 @@
 //! The three glyphs JetBrains has no expui equivalent for — the two interaction tools and the
 //! transparency chessboard, which the IntelliJ-side editor draws in code — are drawn to the same
 //! 16×16 conventions.
+//!
+//! The application's own mark lives here too ([`app_icon`]), because it comes from the same
+//! place: one SVG, rasterised by the engine the app already links against.
+
+use std::sync::Arc;
 
 use gpui_component::Icon;
+use image::RgbaImage;
 
 /// A toolbar glyph, resolved to its embedded SVG.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -63,4 +69,33 @@ impl From<ToolbarIcon> for Icon {
         // `data` embeds the bytes directly, so the app needs no asset bundle registered.
         Icon::default().data(icon.bytes())
     }
+}
+
+/// The application's window icon, rasterised from `assets/app-icon.svg`.
+///
+/// X11 takes a window's icon from `_NET_WM_ICON`, which is set from the window options — so the
+/// pixels have to be ready before the window opens. Rendering them here rather than committing a
+/// PNG keeps the SVG the single source of truth: the same file is what the Windows build packs
+/// into the `.exe` (see `build.rs`), so the title bar, the taskbar and the Alt-Tab switcher all
+/// show one mark. Wayland has no window-icon concept and macOS reads the bundle, so there the
+/// result is simply unused.
+pub fn app_icon() -> Option<Arc<RgbaImage>> {
+    /// The largest size the shell is likely to ask for; it scales down cleanly from here.
+    const SIZE: u32 = 256;
+    const SVG: &str = include_str!("../assets/app-icon.svg");
+
+    let (mut rgba, w, h) = resvg_bridge::session::render_fit_rgba(SVG, SIZE, SIZE).ok()?;
+
+    // tiny-skia hands back premultiplied pixels, while `RgbaImage` — like `_NET_WM_ICON` — is
+    // straight alpha. Left alone, the antialiased edges of the tile would come out too dark.
+    for px in rgba.chunks_exact_mut(4) {
+        let a = px[3];
+        if a != 0 && a != 255 {
+            for c in 0..3 {
+                px[c] = (((px[c] as u32 * 255) + (a as u32 / 2)) / a as u32).min(255) as u8;
+            }
+        }
+    }
+
+    RgbaImage::from_raw(w, h, rgba).map(Arc::new)
 }
