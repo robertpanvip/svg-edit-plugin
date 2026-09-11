@@ -2,6 +2,7 @@
 //! throw-away usvg projection for rendering / hit-testing on every change.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock};
 
 use resvg::tiny_skia;
 use usvg::{tiny_skia_path, Node, Options, Tree};
@@ -11,6 +12,25 @@ use crate::geom::{fmt_transform, Mat};
 
 const MAX_PX: u32 = 16384;
 const FLATTEN_STEPS: usize = 16;
+
+/// The system font database, scanned once and shared by every parse.
+///
+/// `load_system_fonts()` walks every font directory on the machine — a few ms on a warm
+/// desktop cache, but tens of ms on a slow CPU-only VM. [usvg_options] used to do that on
+/// EVERY parse, and a drag pre-render ([Session::start_drag]) parses the document twice, so
+/// the cost landed exactly when the user pressed the mouse: the drag layers arrived late and
+/// the shape looked "unsynced" during the drag.
+static FONT_DB: LazyLock<Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
+    let mut db = usvg::fontdb::Database::new();
+    db.load_system_fonts();
+    Arc::new(db)
+});
+
+pub fn usvg_options() -> Options<'static> {
+    let mut o = Options::default();
+    o.fontdb = FONT_DB.clone();
+    o
+}
 
 /// Per-element info exposed to the Kotlin layer.
 #[derive(Clone, Debug)]
@@ -28,12 +48,6 @@ pub struct Session {
     boxes: HashMap<String, [f64; 4]>,
     pub width: f64,
     pub height: f64,
-}
-
-pub fn usvg_options() -> Options<'static> {
-    let mut o = Options::default();
-    o.fontdb_mut().load_system_fonts();
-    o
 }
 
 fn mat_of(t: usvg::Transform) -> Mat {
@@ -678,6 +692,20 @@ mod tests {
         assert!(svg.contains("<!-- drawn by hand -->"));
         assert!(svg.contains("<rect id='bg' x='0' y='0' width='200' height='120' fill='#eef'/>"));
         assert!(svg.contains("transform=\"translate(10 0)\""));
+    }
+
+    #[test]
+    fn usvg_options_reuses_one_scanned_font_database() {
+        // `load_system_fonts()` scans every font directory; calling it per parse cost ~8 ms
+        // each (far more on a slow CPU-only VM) and a drag pre-render parses the document
+        // twice, so the whole cost landed on the mouse press and the drag preview arrived
+        // late. Guard that every call shares the one scanned database instead.
+        let a = usvg_options();
+        let b = usvg_options();
+        assert!(
+            Arc::ptr_eq(&a.fontdb, &b.fontdb),
+            "usvg_options must reuse the cached font database, not rescan the system",
+        );
     }
 
     #[test]

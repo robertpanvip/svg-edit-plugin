@@ -246,8 +246,12 @@ class SvgEditorPanel(
 
     /** View parameters for one sidecar content frame (Rust maps px = svg*scale + tx).
      *  `down` is the burst downscale used to produce this frame (1.0 at rest; display
-     *  compensates by up-scaling by `1/down`). */
+     *  compensates by up-scaling by `1/down`). `svg` stamps the document the frame was
+     *  requested from: a frame that was still rendering when the user released an edit would
+     *  otherwise come back painted from the PRE-edit document and overwrite the committed
+     *  frame — the "it moves, then snaps back on mouse-up" symptom on slow machines. */
     private data class VpTag(
+        val svg: String,
         val vw: Int,
         val vh: Int,
         val scale: Double,
@@ -1069,6 +1073,7 @@ class SvgEditorPanel(
         return if (w * viewScale <= viewW() && h * viewScale <= viewH()) {
             vpViewportMode = true
             VpTag(
+                svg = engine.svgSource,
                 vw = kotlin.math.max(1, kotlin.math.round(viewW() * dpr).toInt()),
                 vh = kotlin.math.max(1, kotlin.math.round(viewH() * dpr).toInt()),
                 scale = viewScale * dpr,
@@ -1079,6 +1084,7 @@ class SvgEditorPanel(
         } else {
             vpViewportMode = false
             VpTag(
+                svg = engine.svgSource,
                 vw = devicePx(w),
                 vh = devicePx(h),
                 scale = viewScale * dpr,
@@ -2366,6 +2372,11 @@ class SvgEditorPanel(
             // The commit frame's w/h are the render size, not the document size — rebuild the
             // layout around the engine's document dimensions.
             engine.adoptSource(c.svg, SvgLayout(engine.layout.width, engine.layout.height, c.elements))
+            // Drop any content frame still queued for the pre-edit document: it renders the OLD
+            // geometry, and on a slow (CPU-only) machine it can land after this commit frame and
+            // make the element visibly snap back to where it was before the drag. The frame's own
+            // tag would reject it anyway; cancelling also saves the wasted render.
+            scheduler?.cancel(RenderScheduler.Slot.CONTENT)
             contentDown = 1.0 // commit frames are always full resolution
             if (vpViewportMode) {
                 vpImage = c.png
