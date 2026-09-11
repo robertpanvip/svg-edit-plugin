@@ -42,8 +42,8 @@ intellijPlatform {
         name = "SVG Editor"
         version = project.version as String
         vendor {
-            name = "example"
-            email = "dev@example.com"
+            name = "PAN"
+            email = "robertpanvip@163.com"
         }
         // Compatibility range. The plugin is compiled against IDEA 2023.2.5 (build 232) but must
         // also install on newer IDEs. IJP otherwise auto-derives `untilBuild="232.*"` from the SDK,
