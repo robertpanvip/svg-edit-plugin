@@ -42,6 +42,8 @@
 //! - `optimize` `{svg,options?}` → `{svg,beforeBytes,afterBytes,passes}` — `options` is
 //!   `{pluginName: bool}` and only needs to carry the ones switched OFF; a name it omits keeps
 //!   SVGO's default (on). Reports the input and output byte counts for the result dialog.
+//! - `format` `{svg}` → `{svg}` — re-indents the source so the minified line SVGO returns is
+//!   readable again. Changes only the whitespace *between* elements, never the text of one.
 //!
 //! Any panic inside a handler is caught and turned into an `error` response so
 //! a single bad request never takes the process (and thus the IDE session) down.
@@ -50,6 +52,7 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::{json, Value};
 
+use resvg_bridge::format;
 use resvg_bridge::geom::Mat;
 use resvg_bridge::optimize::{self, OptimizeOptions};
 use resvg_bridge::session::{base64_png, layout_of, render_fit_rgba, Session};
@@ -204,6 +207,10 @@ fn dispatch(session: &mut Option<Session>, method: &str, p: &Value) -> Result<Va
                 "afterBytes": result.after_bytes,
                 "passes": result.passes,
             }))
+        }
+        "format" => {
+            let svg = p.get("svg").and_then(Value::as_str).ok_or("missing svg")?;
+            Ok(json!({ "svg": format::format(svg) }))
         }
         other => Err(format!("unknown method '{other}'")),
     }

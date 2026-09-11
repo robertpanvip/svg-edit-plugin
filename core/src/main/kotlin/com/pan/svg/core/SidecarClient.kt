@@ -360,6 +360,22 @@ open class SidecarClient(private val command: List<String>) : AutoCloseable {
         )
     }
 
+    /**
+     * Re-indents [svg] so the source is readable again (SVGO hands back one minified line).
+     *
+     * Stateless like [layoutOf]: it formats a throw-away copy and leaves [open]'s document
+     * untouched. Only the whitespace *between* elements changes — an element carrying text keeps
+     * its exact bytes, so reformatting can never move a glyph on the canvas.
+     */
+    fun format(svg: String): String {
+        val res =
+            reply(
+                request("format", linkedMapOf("svg" to svg), replayOnRestart = false),
+                "format",
+            )
+        return res["svg"] as? String ?: throw SidecarException("format reply missing svg")
+    }
+
     override fun close() {
         closed = true
         synchronized(startLock) {

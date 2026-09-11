@@ -47,18 +47,23 @@ object SvgEasyToolbar {
     }
 
     /**
-     * Builds the two SVGO actions as their own small toolbar, so the host can pin them at the
-     * top-right of the editor (to the right of the size label). [enabled] lets the host reflect
-     * whether the canvas and engine are actually available, mirroring [PanelAction.update]'s use
-     * of `panel.isShowing`; it is evaluated on the EDT.
+     * Builds the document-level actions as their own small toolbar, so the host can pin them at
+     * the top-right of the editor (to the right of the size label): Format, then the SVGO pair.
+     * They all rewrite the whole file rather than a selection, which is why they sit apart from
+     * [forPanel]'s editing tools. [enabled] lets the host reflect whether the canvas and engine are
+     * actually available, mirroring [PanelAction.update]'s use of `panel.isShowing`; it is
+     * evaluated on the EDT.
      */
-    fun forSvgo(
+    fun forDocument(
+        onFormat: () -> Unit,
         onConfigure: () -> Unit,
         onRun: () -> Unit,
         enabled: () -> Boolean = { true },
     ): JComponent {
         val group =
             DefaultActionGroup(
+                FormatAction(onFormat, enabled),
+                Separator.create(),
                 SvgoSettingsAction(onConfigure, enabled),
                 SvgoRunAction(onRun, enabled),
             )
@@ -213,11 +218,11 @@ object SvgEasyToolbar {
     }
 
     /**
-     * The stateless SVGO actions take callbacks rather than a panel (the optimization lives in the
-     * host, which owns the document and sidecar); [enabled] carries the availability flag so the
-     * buttons grey out while the canvas/engine is missing, like [PanelAction] does.
+     * The document-level actions take callbacks rather than a panel (they live in the host, which
+     * owns the document and sidecar); [enabled] carries the availability flag so the buttons grey
+     * out while the canvas/engine is missing, like [PanelAction] does.
      */
-    private abstract class SvgoAction(
+    private abstract class DocumentAction(
         text: String,
         description: String,
         icon: Icon,
@@ -230,11 +235,26 @@ object SvgEasyToolbar {
         override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.EDT
     }
 
+    private class FormatAction(
+        private val onFormat: () -> Unit,
+        enabled: () -> Boolean,
+    ) :
+        DocumentAction(
+            "Format",
+            "Format: re-indent the SVG so the source is readable again",
+            EditorIcons.format(),
+            enabled,
+        ) {
+        override fun actionPerformed(e: AnActionEvent) {
+            onFormat()
+        }
+    }
+
     private class SvgoSettingsAction(
         private val onConfigure: () -> Unit,
         enabled: () -> Boolean,
     ) :
-        SvgoAction(
+        DocumentAction(
             "SVGO Settings",
             "SVGO Settings: choose which optimizations run",
             EditorIcons.svgoSettings(),
@@ -249,7 +269,7 @@ object SvgEasyToolbar {
         private val onRun: () -> Unit,
         enabled: () -> Boolean,
     ) :
-        SvgoAction(
+        DocumentAction(
             "SVGO",
             "SVGO: optimize the current SVG",
             EditorIcons.svgoRun(),

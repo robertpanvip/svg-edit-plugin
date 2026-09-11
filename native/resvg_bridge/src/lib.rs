@@ -22,6 +22,7 @@
 //! the `dom`/`geom`/`session` modules below.
 
 pub mod dom;
+pub mod format;
 pub mod geom;
 pub mod optimize;
 pub mod pick;

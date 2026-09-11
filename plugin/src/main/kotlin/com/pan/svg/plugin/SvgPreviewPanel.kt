@@ -91,8 +91,8 @@ class SvgPreviewPanel(
     /** Built on the EDT once [panel] exists. */
     private var toolbar: JComponent? = null
 
-    /** The two SVGO actions, pinned at the far right of [infoHeader]; built alongside [toolbar]. */
-    private var svgoToolbar: JComponent? = null
+    /** The document-level actions (Format + SVGO), pinned at the far right of [infoHeader]. */
+    private var documentToolbar: JComponent? = null
 
     /** Pass catalogue from `optimizePasses`, cached after the first settings dialog. */
     private var svgoPasses: List<SvgoPass>? = null
@@ -118,9 +118,9 @@ class SvgPreviewPanel(
         }
 
     /**
-     * Right end of [infoHeader]: [infoValue] followed by [svgoToolbar], so the two SVGO buttons
-     * land at the very top-right corner of the editor (to the right of the size label), matching
-     * the built-in image viewer's placement of its info readout.
+     * Right end of [infoHeader]: [infoValue] followed by [documentToolbar], so the Format and
+     * SVGO buttons land at the very top-right corner of the editor (to the right of the size
+     * label), matching the built-in image viewer's placement of its info readout.
      */
     private val infoRight: JPanel =
         JPanel().apply {
@@ -280,8 +280,9 @@ class SvgPreviewPanel(
                         toolbar = null
                     }
                     try {
-                        svgoToolbar =
-                            SvgEasyToolbar.forSvgo(
+                        documentToolbar =
+                            SvgEasyToolbar.forDocument(
+                                onFormat = { runFormat() },
                                 onConfigure = { configureSvgo() },
                                 onRun = { runSvgo() },
                                 // Disabled while the canvas is hidden (background tab) or the engine
@@ -289,8 +290,8 @@ class SvgPreviewPanel(
                                 enabled = { panel?.isShowing == true && ownedSidecar != null },
                             )
                     } catch (t: Throwable) {
-                        LOG.warn("preview: SVGO toolbar build failed", t)
-                        svgoToolbar = null
+                        LOG.warn("preview: document toolbar build failed", t)
+                        documentToolbar = null
                     }
                     c.onStatus = { refreshInfo() }
                     c.onRenderError = { showParseError(it) }
@@ -348,7 +349,7 @@ class SvgPreviewPanel(
             infoHeader.removeAll()
             infoRight.removeAll()
             infoRight.add(infoValue)
-            svgoToolbar?.let { infoRight.add(it) }
+            documentToolbar?.let { infoRight.add(it) }
             infoHeader.add(bar, BorderLayout.CENTER)
             infoHeader.add(infoRight, BorderLayout.EAST)
             root.add(infoHeader, BorderLayout.NORTH)
@@ -466,6 +467,48 @@ class SvgPreviewPanel(
                     }
                 }
                 showSvgoResultDialog(panel, result)
+            }
+        }
+    }
+
+    /**
+     * Re-indents the document through the stateless `format` RPC. SVGO hands back one minified
+     * line — right for shipping, unreadable in the editor — so this is a separate action rather
+     * than something the optimiser does on the way out. Like [runSvgo] the work runs off the EDT
+     * and the result is written back through a [WriteCommandAction], so the IDE's own Undo brings
+     * the previous text back in one step.
+     */
+    private fun runFormat() {
+        val sidecar = ownedSidecar ?: return
+        val doc = document
+        val source = doc?.text ?: fileText()
+        if (source == null) {
+            Messages.showErrorDialog(project, "There is no SVG text to format.", "Format")
+            return
+        }
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val formatted =
+                try {
+                    sidecar.format(source)
+                } catch (t: Throwable) {
+                    LOG.warn("preview: format failed", t)
+                    SwingUtilities.invokeLater {
+                        Messages.showErrorDialog(
+                            project,
+                            "Format failed: ${t.message ?: t.javaClass.simpleName}",
+                            "Format",
+                        )
+                    }
+                    return@executeOnPooledThread
+                }
+            SwingUtilities.invokeLater {
+                if (doc != null && formatted != source) {
+                    // No suppressReload here: formatting changes no element, so the debounced
+                    // DocumentListener reload just re-parses the text the canvas already shows.
+                    WriteCommandAction.runWriteCommandAction(project) {
+                        doc.setText(formatted)
+                    }
+                }
             }
         }
     }

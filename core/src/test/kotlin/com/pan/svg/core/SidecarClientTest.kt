@@ -75,6 +75,24 @@ class SidecarClientTest {
     }
 
     @Test
+    fun `format sends the source and returns the re-indented svg`() {
+        FakeSidecar().use { sc ->
+            sc.formatReply = linkedMapOf("svg" to "<svg>\n  <rect/>\n</svg>\n")
+            val pretty = sc.format("<svg><rect/></svg>")
+            assertEquals("<svg>\n  <rect/>\n</svg>\n", pretty)
+            assertEquals("<svg><rect/></svg>", sc.paramsOf("format")["svg"])
+        }
+    }
+
+    @Test
+    fun `format surfaces a malformed reply as SidecarException`() {
+        FakeSidecar().use { sc ->
+            sc.formatReply = linkedMapOf("nope" to 1)
+            assertThrows(SidecarException::class.java) { sc.format("<svg/>") }
+        }
+    }
+
+    @Test
     fun `failures surface as SidecarException after one restart retry`() {
         FakeSidecar().use { sc ->
             sc.failOn = "ping"

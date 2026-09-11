@@ -16,6 +16,7 @@ use gpui_component::{
     resizable_panel,
 };
 use resvg_bridge::dom::Stack;
+use resvg_bridge::format;
 use resvg_bridge::optimize::{self, OptimizeOptions, OptimizeResult};
 
 use crate::canvas::{self, Mapping, Shared, Tool, View};
@@ -415,6 +416,9 @@ impl SvgEasyApp {
             .items_center()
             .justify_center()
             .bg(rgba(0x000000a6))
+            // Opaque to the mouse, like [`modal`] — a prompt that only *looks* modal still lets the
+            // canvas behind it take clicks and wheel events.
+            .occlude()
             .child(
                 div()
                     .flex()
@@ -758,9 +762,18 @@ impl SvgEasyApp {
                     }
                 },
             ))
-            // The SVGO pair sits at the far right, away from the document actions: one configures
-            // the optimiser, the other runs it. Both are about the whole file, not the selection,
-            // so nothing to their left governs whether they are available.
+            // The document-wide actions sit at the far right, away from the ones that act on the
+            // selection: formatting re-indents the whole file, and the SVGO pair configures and runs
+            // the optimiser over it.
+            .child(separator())
+            .child(self.tool_button(
+                "format",
+                ToolbarIcon::Format,
+                "格式化：按元素重新缩进整个文档（可 Ctrl+Z 撤销）",
+                true,
+                cx,
+                |this, window, cx| this.run_format(window, cx),
+            ))
             .child(separator())
             .child(self.tool_button(
                 "svgo-settings",
@@ -816,6 +829,10 @@ impl SvgEasyApp {
         match optimize::optimize(&self.editor.source, &options) {
             Ok(result) => {
                 if self.editor.replace_source(result.svg.clone()) {
+                    // Node ids are indices in document order and the optimiser merges and removes
+                    // elements, so a selection that survived the swap would silently come to mean
+                    // other shapes. The undo snapshot holds the old selection, so Ctrl+Z restores it.
+                    self.editor.clear_selection();
                     self.after_document_edit(window, cx);
                 }
                 self.status = None;
@@ -824,6 +841,18 @@ impl SvgEasyApp {
             Err(e) => self.status = Some((format!("SVGO 优化失败：{e}"), true)),
         }
         cx.notify();
+    }
+
+    /// The Format action: re-indent the document.
+    ///
+    /// SVGO hands back one minified line — right for shipping, unreadable in the XML pane — so
+    /// formatting is its own step rather than something the optimiser does on the way out. It
+    /// changes no element, so unlike an optimisation the selection is left alone.
+    fn run_format(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pretty = format::format(&self.editor.source);
+        if self.editor.replace_source(pretty) {
+            self.after_document_edit(window, cx);
+        }
     }
 
     /// The SVGO settings dialog: the engine's catalogue as checkboxes, grouped as the engine
@@ -1040,6 +1069,10 @@ fn modal(
         .items_center()
         .justify_center()
         .bg(rgba(0x000000a6))
+        // A modal has to be opaque to the mouse as well as to the eye. Without this the backdrop is
+        // painted but not *hit*, so gpui keeps reporting the canvas underneath as hovered: a wheel
+        // over the dialog would still zoom the document behind it.
+        .occlude()
         .child(
             div()
                 .flex()

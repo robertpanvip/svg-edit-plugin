@@ -113,6 +113,20 @@ object EditorIcons {
         g2.fill(bolt)
     }
 
+    /**
+     * Format: four text lines of uneven length — the usual "re-indent" mark. Deliberately unlike
+     * [svgoSettings] (a cog) so the two document buttons stay distinguishable, and matching the
+     * native toolbar's `format.svg` glyph bar for bar.
+     */
+    fun format(): Icon = vectorIcon { g2, pen ->
+        g2.color = pen
+        val widths = intArrayOf(13, 8, 11, 6)
+        val tops = intArrayOf(2, 6, 9, 13)
+        for (i in widths.indices) {
+            g2.fillRect(1, tops[i], widths[i], 1)
+        }
+    }
+
     private fun vectorIcon(body: (Graphics2D, Color) -> Unit): Icon =
         object : Icon {
             override fun getIconWidth(): Int = SIZE

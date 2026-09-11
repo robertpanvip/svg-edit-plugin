@@ -384,21 +384,20 @@ impl Editor {
         true
     }
 
-    /// Replaces the whole document with `text` — how the SVGO action lands its result.
+    /// Replaces the whole document with `text` — how an action that produces a new document (SVGO,
+    /// Format) lands its result.
     ///
     /// Deliberately not [`Self::set_source`], which records a *text* edit and so can merge into the
-    /// previous undo step when the user presses the button right after typing. An optimisation is
-    /// its own edit: one Ctrl+Z must put the unoptimised document back, whole.
+    /// previous undo step when the user presses the button right after typing. A generated document
+    /// is always its own edit: one Ctrl+Z must put the previous one back, whole.
     ///
-    /// The selection is dropped rather than carried over: node ids are indices in document order,
-    /// and the optimiser merges and removes elements, so a surviving id would quietly come to mean
-    /// a different shape. The undo snapshot holds the old selection, so Ctrl+Z brings it back.
+    /// The selection is left as it was: only the caller knows whether the new text still means the
+    /// same thing by node id ([`Self::clear_selection`] if it does not).
     pub fn replace_source(&mut self, text: String) -> bool {
         if text == self.source {
             return false;
         }
         let before = self.snapshot();
-        self.selection.clear();
         self.source = text;
         self.record_structural(before);
         self.reparse();
@@ -908,6 +907,29 @@ mod tests {
         assert_eq!(e.source, moved);
         assert!(e.undo());
         assert!(e.source.contains("#101010"), "the move is undone next");
+        assert!(e.undo());
+        assert_eq!(e.source, original);
+    }
+
+    /// A generated document (SVGO, Format) is always its own undo step, even when it lands inside
+    /// the window that coalesces text edits — and it leaves the selection to the caller, which is
+    /// what lets a re-indent keep the selected shape while an optimisation drops it.
+    #[test]
+    fn a_replaced_document_is_its_own_undo_step_and_keeps_the_selection() {
+        let mut e = editor();
+        let original = e.source.clone();
+        let card = e.hit(60.0, 60.0, 2.0).expect("card must be hit");
+        e.select_only(card);
+
+        assert!(e.set_source(e.source.replace("#f59e0b", "#f59e0c")));
+        let typed = e.source.clone();
+        assert!(e.replace_source(original.replace("id=\"card\"", "id=\"card-1\"")));
+        assert_ne!(e.source, typed);
+
+        assert_eq!(e.selection, vec![card], "replacing text does not drop the selection");
+
+        assert!(e.undo());
+        assert_eq!(e.source, typed, "the typed text comes back first");
         assert!(e.undo());
         assert_eq!(e.source, original);
     }

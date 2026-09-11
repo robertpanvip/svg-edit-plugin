@@ -1232,12 +1232,21 @@ impl SvgEasyApp {
         }
     }
 
+    /// Ctrl (Cmd on macOS) + wheel zooms about the pointer.
+    ///
+    /// The modifier is required rather than optional: a bare wheel is the gesture people use to
+    /// scroll *whatever is under the pointer*, so binding zoom to it meant a scroll meant for an
+    /// overlay — or a reflexive scroll while reading the XML pane with the pointer drifting over
+    /// the canvas — silently rescaled the document. Zoom is a deliberate act; scrolling is not.
     fn on_canvas_wheel(
         &mut self,
         ev: &ScrollWheelEvent,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !ev.modifiers.secondary() {
+            return;
+        }
         let (Some(m), Some(bounds)) = (self.mapping(), self.bounds()) else {
             return;
         };

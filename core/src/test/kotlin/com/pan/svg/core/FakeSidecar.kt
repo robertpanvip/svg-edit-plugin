@@ -28,6 +28,9 @@ open class FakeSidecar : SidecarClient(listOf("fake-sidecar")) {
     var optimizeReply: Any? =
         linkedMapOf("svg" to "<svg/>", "beforeBytes" to 182L, "afterBytes" to 134L, "passes" to 34)
 
+    /** Reply for `format`; set to a map without `svg` to exercise a malformed reply. */
+    var formatReply: Any? = linkedMapOf("svg" to "<svg>\n  <rect/>\n</svg>\n")
+
     private val pngB64 =
         Base64.getEncoder().encodeToString(
             Base64.getDecoder().decode(
@@ -78,6 +81,7 @@ open class FakeSidecar : SidecarClient(listOf("fake-sidecar")) {
             "renderViewport" -> linkedMapOf("png" to pngB64)
             "optimizePasses" -> optimizePassesReply
             "optimize" -> optimizeReply
+            "format" -> formatReply
             else -> throw SidecarException("fake sidecar: unexpected method '$method'")
         }
     }
