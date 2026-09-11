@@ -122,27 +122,23 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
       - name: Download the archives
         uses: actions/download-artifact@v5
         with:
           path: dist
           merge-multiple: true
 
-      # Build Plugin publishes the same tag and may be creating that release at this very moment,
-      # so creating it here is best effort and the upload retries: whichever job arrives second
-      # simply adds its own files to the release the other one made.
-      - name: Create or update the release
+      # The same mechanism as Build Plugin's Create Release, and deliberately so: both workflows
+      # publish to the same tag's release, and this action is create-or-update, so whichever one
+      # arrives second simply adds its own files to the release the other already made. (Neither
+      # workflow has to know about the other, and no ordering between them is required.)
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist/*
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # This job does not check the repository out, so `gh` has no git context to infer the
-          # repository from — without this it fails with "not a git repository".
-          GH_REPO: ${{ github.repository }}
-        run: |
-          tag="${GITHUB_REF#refs/tags/}"
-          gh release create "$tag" --title "$tag" --generate-notes || true
-          for attempt in 1 2 3 4 5; do
-            gh release upload "$tag" dist/* --clobber && exit 0
-            sleep 10
-          done
-          echo "could not attach the archives to $tag" >&2
-          exit 1
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
