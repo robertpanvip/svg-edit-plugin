@@ -259,6 +259,55 @@ open class SidecarClient(private val command: List<String>) : AutoCloseable {
         return decodePng(png)
     }
 
+    /**
+     * Layout of an arbitrary SVG string, as the `{width,height,elements[]}` reply map.
+     *
+     * Stateless: the sidecar parses a throw-away document, so this never disturbs the document
+     * opened by [open]. It backs [SidecarRenderer], which is how the editor obtains a layout once
+     * it no longer bundles the JNA cdylib.
+     */
+    fun layoutOf(svg: String): Map<*, *> =
+        reply(
+            request("layout", linkedMapOf("svg" to svg), replayOnRestart = false),
+            "layout",
+        )
+
+    /**
+     * Stateless fit render to raw **premultiplied RGBA8** ([RgbaResult]) — the sidecar equivalent
+     * of the cdylib's `svg_render_rgba_bytes`.
+     *
+     * Raw pixels rather than a PNG keep the panel's hot path free of an encode/decode round trip,
+     * and the geometry mirrors the cdylib exactly (uniform scale to fit inside `vw × vh`, 0 = the
+     * document's natural size), so existing rasters stay pixel-identical.
+     */
+    fun renderFitRgba(
+        svg: String,
+        vw: Int,
+        vh: Int,
+    ): RgbaResult {
+        val res =
+            reply(
+                request(
+                    "renderFit",
+                    linkedMapOf("svg" to svg, "vw" to vw, "vh" to vh),
+                    replayOnRestart = false,
+                ),
+                "renderFit",
+            )
+        val rgba = res["rgba"] as? String ?: throw SidecarException("renderFit reply missing rgba")
+        val bytes =
+            try {
+                Base64.getDecoder().decode(rgba)
+            } catch (e: IllegalArgumentException) {
+                throw SidecarException("sidecar sent a malformed base64 payload")
+            }
+        return RgbaResult(
+            rgba = bytes,
+            width = (res["w"] as? Number)?.toInt() ?: 0,
+            height = (res["h"] as? Number)?.toInt() ?: 0,
+        )
+    }
+
     override fun close() {
         closed = true
         synchronized(startLock) {

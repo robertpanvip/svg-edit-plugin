@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.pan.svg"
-version = "0.6.20"
+version = "0.6.21"
 
 repositories {
     maven("https://mirrors.cloud.tencent.com/nexus/repository/maven-public/")
@@ -60,59 +60,18 @@ intellijPlatform {
             ide("2023.2.5")
         }
     }
-    // Bundle the native resvg bridges for EVERY platform we have a build for, so one plugin
-    // zip installs on any OS — SvgBridgeLoader picks the right file name for the runtime OS
-    // (resvg_bridge.dll / libresvg_bridge.dylib / libresvg_bridge.so). The Windows dll is
-    // cross-built on Linux via `cargo build --release --target x86_64-pc-windows-gnu`
-    // (RUSTFLAGS="-C target-feature=+crt-static" keeps it self-contained). macOS has no
-    // cross build here; its users can drop a locally built dylib into <IDE config>/svg-editor/.
-    val nativeBase = file("../native/resvg_bridge/target")
-    // cargo places the cdylib under target/<triple>/release when built with --target,
-    // else under target/{release,debug}[/{deps}/]. Search all layouts.
-    val nativeCandidates =
-        mapOf(
-            "resvg_bridge.dll" to
-                listOf(
-                    "x86_64-pc-windows-gnu/release",
-                    "x86_64-pc-windows-gnu/release/deps",
-                    "release",
-                    "debug",
-                    "release/deps",
-                    "debug/deps",
-                ),
-            "libresvg_bridge.dylib" to listOf("release", "debug", "release/deps", "debug/deps"),
-            "libresvg_bridge.so" to listOf("release", "debug", "release/deps", "debug/deps"),
-        )
-
-    // Resolve the first existing file for each candidate name.
-    val nativeLibs =
-        nativeCandidates.mapNotNull { (fileName, searchPaths) ->
-            val found =
-                searchPaths.firstNotNullOfOrNull { sub ->
-                    file("$nativeBase/$sub/$fileName").takeIf { it.exists() }
-                }
-            if (found != null) println("Bundled native lib: ${found.absolutePath}")
-            else println("NOTE: native lib '$fileName' not found under $nativeBase (skipped)")
-            found
-        }
-    if (nativeLibs.isEmpty()) {
-        throw GradleException("No native resvg bridge found under $nativeBase — build it first (cargo build --release)")
-    }
-    // Copy the native libs into processResources output as a task so that `clean` + rebuild
-    // reliably bundle them (a config-phase `project.copy` is lost after `clean`).
-    tasks.register<Copy>("copyNativeLibs") {
-        from(nativeLibs)
-        into(layout.buildDirectory.dir("resources/main"))
-    }
-    tasks.named("processResources") { dependsOn("copyNativeLibs") }
-    tasks.named("buildPlugin") { dependsOn("processResources") }
+    // NOTE: no native cdylib is bundled. The plugin ships a single engine — the
+    // `svg_easy_sidecar` executable (see the SidecarLoader section below) — which serves render,
+    // layout and hit testing. Packing a JNA cdylib as well would add a second full copy of
+    // resvg+usvg per platform for an engine nothing calls.
 }
 
 // ---- Sidecar executable bundling ------------------------------------------------
-// The Rust `svg_easy_sidecar` binary is bundled per OS under resources/main/sidecar/<os>/
-// (Linux & macOS share the file name, so they must not share a jar root). SidecarLoader
-// extracts the right subdir at runtime. Optional: when no sidecar is present the plugin runs
-// the legacy in-process pipeline, so a missing binary is a NOTE, never a build failure.
+// The Rust `svg_easy_sidecar` binary is the plugin's only rendering engine, bundled per OS
+// under resources/main/sidecar/<os>/ (Linux & macOS share the file name, so they must not share
+// a jar root). SidecarLoader extracts the right subdir at runtime. At least one binary is
+// required — without it the plugin can only show the "engine not available" guide — so an empty
+// result fails the build instead of silently producing a useless zip.
 val sidecarBase = file("../native/resvg_bridge/target/sidecar")
 val osForSidecar =
     mapOf(
@@ -140,15 +99,19 @@ val sidecarFiles =
         else println("NOTE: sidecar '$name' not found for os=$os (skipped)")
         found?.let { os to it }
     }
-if (sidecarFiles.isNotEmpty()) {
-    tasks.register<Copy>("copySidecarBinaries") {
-        sidecarFiles.forEach { (os, f) ->
-            from(f) { into("sidecar/$os") }
-        }
-        into(layout.buildDirectory.dir("resources/main"))
-    }
-    tasks.named("processResources") { dependsOn("copySidecarBinaries") }
+if (sidecarFiles.isEmpty()) {
+    throw GradleException(
+        "No svg_easy_sidecar found under $sidecarBase — build it first (cargo build --release --bin svg_easy_sidecar)",
+    )
 }
+tasks.register<Copy>("copySidecarBinaries") {
+    sidecarFiles.forEach { (os, f) ->
+        from(f) { into("sidecar/$os") }
+    }
+    into(layout.buildDirectory.dir("resources/main"))
+}
+tasks.named("processResources") { dependsOn("copySidecarBinaries") }
+tasks.named("buildPlugin") { dependsOn("processResources") }
 
 // Rename the distributable zip. By default its base name is the Gradle subproject
 // name ("plugin"), giving "plugin-<version>.zip". Override it to something meaningful.

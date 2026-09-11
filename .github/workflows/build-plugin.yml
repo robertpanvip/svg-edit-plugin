@@ -34,37 +34,13 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build resvg_bridge
+      - name: Build svg_easy_sidecar
         working-directory: native/resvg_bridge
-        run: cargo build --release
+        run: cargo build --release --bin svg_easy_sidecar
 
-      # Upload ONLY the platform's cdylib so the plugin job can bundle all three
-      # platform libs into one cross-platform plugin zip (uploading the whole
-      # target/release/ dir would drag in multi-GB build intermediates).
-      - name: Upload native artifact (Linux)
-        if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v5
-        with:
-          name: native-lib-${{ matrix.os }}
-          path: native/resvg_bridge/target/release/libresvg_bridge.so
-
-      - name: Upload native artifact (Windows)
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v5
-        with:
-          name: native-lib-${{ matrix.os }}
-          path: native/resvg_bridge/target/release/resvg_bridge.dll
-
-      - name: Upload native artifact (macOS)
-        if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v5
-        with:
-          name: native-lib-${{ matrix.os }}
-          path: native/resvg_bridge/target/release/libresvg_bridge.dylib
-
-      # The sidecar executable is bundled alongside the cdylib (one per OS). Linux/macOS share
-      # the file name, so CI stores them under target/sidecar/<os>/ and the plugin gradle task
-      # copies each into the jar's sidecar/<os>/ resource dir.
+      # The sidecar executable is the plugin's only rendering engine, one per OS. Linux/macOS
+      # share the file name, so CI uploads each OS's binary separately and the plugin gradle task
+      # copies them into the jar's sidecar/<os>/ resource dir.
       - name: Upload sidecar artifact (Linux)
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v5
@@ -104,28 +80,6 @@ jobs:
           distribution: temurin
           cache: gradle
 
-
-      # Download ALL platform native libs produced by the build-native job so the
-      # bundled plugin zip works on Windows/macOS/Linux (SvgBridgeLoader picks the
-      # right file name for the runtime OS). Shipping only the Linux .so made the
-      # plugin show a blank/“native library missing” panel on Windows.
-      - name: Download native artifacts
-        uses: actions/download-artifact@v5
-        with:
-          name: native-lib-ubuntu-latest
-          path: native/resvg_bridge/target/release/
-
-      - name: Download native artifacts (Windows)
-        uses: actions/download-artifact@v5
-        with:
-          name: native-lib-windows-latest
-          path: native/resvg_bridge/target/release/
-
-      - name: Download native artifacts (macOS)
-        uses: actions/download-artifact@v5
-        with:
-          name: native-lib-macos-latest
-          path: native/resvg_bridge/target/release/
 
       # Download each OS's sidecar executable into a per-OS dir (Linux/macOS share the file
       # name, so a flat release/ dir would clobber them). plugin/build.gradle.kts bundles

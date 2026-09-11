@@ -28,6 +28,13 @@
 //!   ids work too) and returns the updated document + content frame.
 //! - `renderViewport` `{vw?,vh?,scale?,tx?,ty?}` → `{png,w,h}` (viewBox zoom)
 //!
+//! Stateless helpers (they ignore / never touch the open document, so the Kotlin side can use the
+//! sidecar as its one and only rendering engine instead of bundling the cdylib as well):
+//!
+//! - `layout` `{svg}` → `{width,height,elements:[...]}` — layout of an arbitrary SVG string
+//! - `renderFit` `{svg,vw?,vh?}` → `{rgba,w,h}` — base64 **premultiplied RGBA8**, uniformly
+//!   scaled to fit inside `(vw,vh)`; the same geometry the cdylib's `svg_render_rgba_bytes` had
+//!
 //! Any panic inside a handler is caught and turned into an `error` response so
 //! a single bad request never takes the process (and thus the IDE session) down.
 
@@ -36,7 +43,7 @@ use std::io::{self, BufRead, Write};
 use serde_json::{json, Value};
 
 use resvg_bridge::geom::Mat;
-use resvg_bridge::session::{base64_png, Session};
+use resvg_bridge::session::{base64_png, layout_of, render_fit_rgba, Session};
 
 const PROTOCOL: u32 = 1;
 
@@ -155,6 +162,17 @@ fn dispatch(session: &mut Option<Session>, method: &str, p: &Value) -> Result<Va
             let (vw, vh) = dims(p);
             let (scale, tx, ty) = view(p);
             s.render_viewport(vw, vh, scale, tx, ty)
+        }
+        // Stateless: parses the given string, leaving any open document untouched.
+        "layout" => {
+            let svg = p.get("svg").and_then(Value::as_str).ok_or("missing svg")?;
+            layout_of(svg)
+        }
+        "renderFit" => {
+            let svg = p.get("svg").and_then(Value::as_str).ok_or("missing svg")?;
+            let (vw, vh) = dims(p);
+            let (rgba, w, h) = render_fit_rgba(svg, vw, vh)?;
+            Ok(json!({ "rgba": base64_png(&rgba), "w": w, "h": h }))
         }
         other => Err(format!("unknown method '{other}'")),
     }

@@ -3,6 +3,23 @@ name = "resvg_bridge"
 version = "0.5.0"
 edition = "2021"
 
+[profile.release]
+# Size tuning. The plugin ships one copy of this crate per platform, so every byte is paid for
+# three times over.
+#
+# opt-level is deliberately left at the default (3). Measured on a 600-shape document, building
+# with opt-level="s" rendered 2.5x and opt-level="z" 4.4x SLOWER than opt-level=3 — unusable for
+# an interactive editor. LTO + a single codegen unit get most of the size win *without* that
+# regression (23.5ms -> 22.4ms per render here, i.e. neutral-to-faster).
+lto = "fat"
+codegen-units = 1
+# Drop symbol tables. JNA resolves entry points through .dynsym, which `strip` preserves.
+strip = "symbols"
+# panic MUST stay "unwind": the sidecar's request loop wraps every handler in catch_unwind so a
+# single bad request becomes an error reply instead of taking the process (and the IDE session)
+# down. "abort" would compile that safety net away.
+panic = "unwind"
+
 [lib]
 name = "resvg_bridge"
 # cdylib => loadable by JNA from Kotlin. rlib => lets `cargo test` exercise the logic.

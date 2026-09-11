@@ -1,6 +1,7 @@
 package com.pan.svg.plugin
 
 import com.pan.svg.core.SidecarClient
+import com.pan.svg.core.SidecarRenderer
 import com.pan.svg.core.SvgEditorPanel
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
@@ -44,8 +45,8 @@ private val LOG = Logger.getInstance("SvgEasy")
  * editors use, since `TextEditorWithPreview` takes the preview as a `FileEditor`).
  *
  * Construction is cheap and never blocks the EDT: the constructor shows a brief "loading"
- * placeholder and hands the expensive work (locating the native renderer, extracting JNA's
- * jnidispatch, building the canvas, parsing the document) to a pooled thread
+ * placeholder and hands the expensive work (locating the `svg_easy_sidecar` engine, starting it,
+ * building the canvas, parsing the document) to a pooled thread
  * ([startBackgroundInit]). The finished canvas is assembled onto [root] on the EDT. Text edits
  * made while the renderer is still loading are picked up by the debounced reload as usual, and a
  * load performed before the canvas existed is never lost — the background init parses the
@@ -58,7 +59,7 @@ private val LOG = Logger.getInstance("SvgEasy")
  *
  * A [suppressReload] guard prevents the canvas→text write from bouncing back into a reload.
  *
- * If the native renderer cannot be loaded (e.g. the plugin zip was built on another OS), the
+ * If the rendering engine cannot be located (e.g. the plugin zip was built on another OS), the
  * canvas is replaced by [NativeLibGuidePanel] instead of crashing editor creation.
  */
 class SvgPreviewPanel(
@@ -215,50 +216,42 @@ class SvgPreviewPanel(
     }
 
     /**
-     * Locates the native renderer OFF the EDT. The very first call extracts JNA's jnidispatch
-     * from an IDE lib jar — on a cold cache that previously blocked editor creation (inside
-     * `writeIntentReadAction` on the EDT) for >20 s. The result is cached process-wide, so later
-     * opens skip this step. Only the (fast) Swing canvas build and initial SVG parse happen back
-     * on the EDT; actual rendering is async inside [SvgEditorPanel].
+     * Locates the rendering engine OFF the EDT. Resolving extracts the bundled
+     * `svg_easy_sidecar` executable from the plugin jar to a temp file — cached process-wide and
+     * usually already warmed by [SvgNativePreloader], so later opens skip this step. Only the
+     * (fast) Swing canvas build and initial SVG parse happen back on the EDT; actual rendering is
+     * async inside [SvgEditorPanel].
      */
     private fun startBackgroundInit() {
         val app = ApplicationManager.getApplication()
         app.executeOnPooledThread {
-            val renderer = SvgBridgeLoader.loadOrNull()
-            if (disposed) return@executeOnPooledThread
             val sidecar =
-                if (renderer != null) {
-                    runCatching {
-                        SidecarLoader.resolveOrNull()?.let { SidecarClient(listOf(it)) }
-                    }.onFailure { LOG.warn("preview: sidecar resolve failed; using in-process pipeline", it) }
-                        .getOrNull()
-                } else {
-                    null
-                }
-            val builtSidecar = sidecar
+                runCatching { SidecarLoader.resolveOrNull()?.let { SidecarClient(listOf(it)) } }
+                    .onFailure { LOG.warn("preview: sidecar start failed", it) }
+                    .getOrNull()
+            val renderer = sidecar?.let { SidecarRenderer(it) }
             SwingUtilities.invokeLater {
                 if (disposed) {
-                    builtSidecar?.close()
+                    sidecar?.close()
                     return@invokeLater
                 }
                 if (renderer == null) {
-                    // Native renderer missing: explain how to supply it.
+                    // Engine missing: explain how to supply it.
                     root.removeAll()
-                    root.add(NativeLibGuidePanel(SvgBridgeLoader.describeAttempts()), BorderLayout.CENTER)
+                    root.add(NativeLibGuidePanel(SidecarLoader.describeAttempts()), BorderLayout.CENTER)
                     root.revalidate()
                     root.repaint()
                     return@invokeLater
                 }
-                val r = renderer
                 var canvas: SvgEditorPanel? = null
                 try {
                     val c =
-                        SvgEditorPanel(r, asyncRendering = true, sidecar = builtSidecar).apply {
+                        SvgEditorPanel(renderer, asyncRendering = true, sidecar = sidecar).apply {
                             onEdit = { writeBack() }
                         }
                     canvas = c
                     panel = c
-                    ownedSidecar = builtSidecar
+                    ownedSidecar = sidecar
                     try {
                         toolbar = SvgEasyToolbar.forPanel(c)
                     } catch (t: Throwable) {
@@ -283,7 +276,7 @@ class SvgPreviewPanel(
                     canvas?.dispose()
                     panel = null
                     ownedSidecar = null
-                    builtSidecar?.close()
+                    sidecar?.close()
                     showParseError(t)
                 }
             }

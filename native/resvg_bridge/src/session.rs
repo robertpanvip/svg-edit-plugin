@@ -437,6 +437,41 @@ fn render_tree_viewport(
     pm.encode_png().map_err(|e| e.to_string())
 }
 
+/// Stateless layout extraction for an arbitrary SVG string: parse a throw-away document and
+/// return its `{width,height,elements[]}` layout.
+///
+/// The Kotlin editor used to get this from the JNA cdylib (`svg_layout_json`); serving it from
+/// the sidecar is what lets the plugin drop its second copy of the rendering engine.
+pub fn layout_of(svg: &str) -> Result<serde_json::Value, String> {
+    Ok(Session::new(svg)?.layout_json())
+}
+
+/// Stateless fit render to **premultiplied RGBA8** (row-major, `w * h * 4` bytes).
+///
+/// Same geometry as the C-ABI `svg_render_rgba_bytes` the JNA cdylib exposed: parse `svg`, scale
+/// it uniformly to fit inside `(fit_w, fit_h)` (0/0 = natural size) and hand back raw pixels, so
+/// the panel's device-resolution rasters stay pixel-identical after the swap.
+pub fn render_fit_rgba(svg: &str, fit_w: u32, fit_h: u32) -> Result<(Vec<u8>, u32, u32), String> {
+    let tree = Tree::from_str(svg, &usvg_options()).map_err(|e| e.to_string())?;
+    let size = tree.size();
+    let (sw, sh) = (size.width(), size.height());
+    let scale = if fit_w > 0 && fit_h > 0 {
+        let s = (fit_w as f32 / sw).min(fit_h as f32 / sh);
+        if s.is_finite() && s > 0.0 {
+            s
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
+    let pw = ((sw * scale).ceil().max(1.0) as u32).clamp(1, MAX_PX);
+    let ph = ((sh * scale).ceil().max(1.0) as u32).clamp(1, MAX_PX);
+    let mut pm = tiny_skia::Pixmap::new(pw, ph).ok_or_else(|| "pixmap alloc failed".to_string())?;
+    resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pm.as_mut());
+    Ok((pm.take(), pw, ph))
+}
+
 pub struct DragImages {
     pub bg_png: Vec<u8>,
     pub ghost_png: Vec<u8>,
@@ -603,6 +638,8 @@ impl Session {
     }
 }
 
+/// Standard-alphabet base64 of a raw byte buffer. Despite the name it is not PNG-specific: the
+/// sidecar also uses it to carry the raw RGBA buffer of `renderFit`.
 pub fn base64_png(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -706,6 +743,33 @@ mod tests {
             Arc::ptr_eq(&a.fontdb, &b.fontdb),
             "usvg_options must reuse the cached font database, not rescan the system",
         );
+    }
+
+    #[test]
+    fn layout_of_is_stateless_and_matches_a_fresh_session() {
+        // The editor asks for `layout` after local edits (elements that carry no sidecar node id),
+        // so it must describe exactly the document a freshly opened Session does.
+        let direct = layout_of(SAMPLE).unwrap();
+        assert_eq!(direct, Session::new(SAMPLE).unwrap().layout_json());
+    }
+
+    #[test]
+    fn render_fit_rgba_scales_uniformly_to_the_fit_box() {
+        // SAMPLE is 200x120, so a 100x60 fit box is exactly half scale.
+        let (rgba, w, h) = render_fit_rgba(SAMPLE, 100, 60).unwrap();
+        assert_eq!((w, h), (100, 60));
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+        assert!(
+            rgba.chunks_exact(4).any(|px| px[3] > 0),
+            "the fit render must actually paint the document",
+        );
+    }
+
+    #[test]
+    fn render_fit_rgba_keeps_natural_size_without_a_fit_box() {
+        let (rgba, w, h) = render_fit_rgba(SAMPLE, 0, 0).unwrap();
+        assert_eq!((w, h), (200, 120));
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
     }
 
     #[test]

@@ -2,10 +2,11 @@ package com.pan.svg.plugin
 
 import com.pan.svg.core.Samples
 import com.pan.svg.core.SidecarClient
+import com.pan.svg.core.SidecarRenderer
 import com.pan.svg.core.SvgEditorPanel
-import com.pan.svg.core.SvgRenderer
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.FileEditorManagerEvent
@@ -24,19 +25,20 @@ import javax.swing.JPanel
 import javax.swing.SwingConstants
 import javax.swing.SwingUtilities
 
+private val LOG = Logger.getInstance("SvgEasy")
+
 /**
- * Registers the SVG editor as a right-docked tool window. Loads the `resvg_bridge` native
- * library (bundled, or built locally) and wires it into [SvgEditorPanel].
+ * Registers the SVG editor as a right-docked tool window. Locates the bundled `svg_easy_sidecar`
+ * rendering engine ([SidecarLoader]) and wires it into [SvgEditorPanel] through [SidecarRenderer].
  *
- * The tool window opens instantly with a "loading" placeholder; the native library is located on
- * a pooled thread — the very first lookup extracts JNA's jnidispatch from an IDE lib jar and can
- * take tens of seconds on a cold cache, so it must never run on the EDT — and the canvas is
- * assembled once it is ready. A later lookup is instant because [SvgBridgeLoader] caches a
- * successful load process-wide.
+ * The tool window opens instantly with a "loading" placeholder; the engine is located and started
+ * on a pooled thread (extracting the bundled executable must never run on the EDT) and the canvas
+ * is assembled once it is ready. A later lookup is instant because [SidecarLoader] caches a
+ * successful resolution process-wide.
  *
- * When the native library cannot be loaded (typically: plugin zip built on another OS, so the
- * library for this platform is not bundled), the tool window shows [NativeLibGuidePanel]
- * explaining how to supply the library — instead of failing with a blank panel.
+ * When the engine cannot be located (typically: plugin zip built on another OS, so the executable
+ * for this platform is not bundled), the tool window shows [NativeLibGuidePanel] explaining how to
+ * supply it — instead of failing with a blank panel.
  *
  * The tool window follows the editor selection: whenever the user selects a `.svg` file in the
  * editor (via [FileEditorManagerListener]), the same file is loaded into the tool window. Parse
@@ -72,14 +74,19 @@ class SvgEditorToolWindowFactory : ToolWindowFactory {
         )
         toolWindow.contentManager.addContent(content)
 
-        // First bridge load reads central directories of IDE lib jars to extract JNA's
-        // jnidispatch (observed >20 s on a cold cache): run it on a pooled thread, then build the
-        // UI body on the EDT.
+        // Locating + starting the sidecar extracts the bundled executable from the plugin jar
+        // (disk I/O): run it on a pooled thread, then build the UI body on the EDT.
         ApplicationManager.getApplication().executeOnPooledThread {
-            val renderer = SvgBridgeLoader.loadOrNull()
+            val sidecar =
+                runCatching { SidecarLoader.resolveOrNull()?.let { SidecarClient(listOf(it)) } }
+                    .onFailure { LOG.warn("toolwindow: sidecar start failed", it) }
+                    .getOrNull()
             SwingUtilities.invokeLater {
-                if (state.disposed) return@invokeLater
-                installBody(project, holder, renderer, lifecycle, state)
+                if (state.disposed) {
+                    sidecar?.close()
+                    return@invokeLater
+                }
+                installBody(project, holder, sidecar, lifecycle, state)
             }
         }
     }
@@ -104,14 +111,13 @@ class SvgEditorToolWindowFactory : ToolWindowFactory {
     private fun installBody(
         project: Project,
         holder: JPanel,
-        renderer: SvgRenderer?,
+        sidecar: SidecarClient?,
         lifecycle: Disposable,
         state: ContentState,
     ) {
-        if (renderer != null) {
-            val sidecarCommand = SidecarLoader.resolveOrNull()
-            state.ownedSidecar = sidecarCommand?.let { SidecarClient(listOf(it)) }
-            val editorPanel = SvgEditorPanel(renderer, asyncRendering = true, sidecar = state.ownedSidecar)
+        if (sidecar != null) {
+            state.ownedSidecar = sidecar
+            val editorPanel = SvgEditorPanel(SidecarRenderer(sidecar), asyncRendering = true, sidecar = sidecar)
             state.panel = editorPanel
             val toolbar = SvgEasyToolbar.forPanel(editorPanel)
             val editorView =
@@ -183,7 +189,7 @@ class SvgEditorToolWindowFactory : ToolWindowFactory {
             show(selected)
         } else {
             holder.removeAll()
-            holder.add(NativeLibGuidePanel(SvgBridgeLoader.describeAttempts()), BorderLayout.CENTER)
+            holder.add(NativeLibGuidePanel(SidecarLoader.describeAttempts()), BorderLayout.CENTER)
             holder.revalidate()
             holder.repaint()
         }
