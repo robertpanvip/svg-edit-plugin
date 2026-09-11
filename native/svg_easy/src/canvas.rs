@@ -24,7 +24,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    Bounds, Context, Corners, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    Bounds, Context, Corners, CursorStyle, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ParentElement, PathBuilder, Pixels, Point, RenderImage,
     ScrollWheelEvent, Styled, Window, canvas, div, point, prelude::*, px, size,
 };
@@ -106,6 +106,10 @@ pub struct View {
     pub grid: bool,
     /// Draw the transparency chessboard behind the image.
     pub chessboard: bool,
+    /// What the pointer is currently over, as a cursor. Kept here rather than recomputed during
+    /// paint: the answer only changes when the pointer crosses a grip, so the canvas repaints then
+    /// and not on every one of the mouse's moves.
+    pub hover_cursor: CursorStyle,
 }
 
 /// What a drag on the canvas means.
@@ -271,6 +275,42 @@ fn grip_at(corners: &[Point<Pixels>; 4], p: Point<Pixels>) -> Option<Handle> {
                 && (at.y.as_f32() - p.y.as_f32()).abs() <= reach
         })
         .map(|(handle, _)| handle)
+}
+
+/// The cursor to show while the pointer sits at `p`.
+///
+/// Mirrors what a press at `p` would do, so the pointer promises exactly what it delivers: in
+/// [`Tool::Marquee`] every press draws a band, in [`Tool::Move`] a grip resizes or rotates, and
+/// anywhere else the press is the plain arrow's business.
+fn cursor_for(
+    tool: Tool,
+    frame: Option<[f64; 4]>,
+    m: &Mapping,
+    p: Point<Pixels>,
+) -> CursorStyle {
+    if tool == Tool::Marquee {
+        return CursorStyle::Crosshair;
+    }
+    match frame.and_then(|frame| grip_at(&corners_of(m, frame), p)) {
+        Some(Handle::Scale(grip)) => grip_cursor(grip),
+        // A rotate handle is not a resize, and no cursor says "turn"; a pointing hand at least
+        // says the dot is grabbable.
+        Some(Handle::Rotate) => CursorStyle::PointingHand,
+        None => CursorStyle::Arrow,
+    }
+}
+
+/// The resize cursor for a scale grip: each one pulls along its own edge or diagonal.
+///
+/// The diagonals are named for the corners they join, which is also how X11 and CSS name them —
+/// `UpLeftDownRight` is the `\` of the north-west and south-east corners.
+fn grip_cursor(grip: Grip) -> CursorStyle {
+    match grip {
+        Grip::Nw | Grip::Se => CursorStyle::ResizeUpLeftDownRight,
+        Grip::Ne | Grip::Sw => CursorStyle::ResizeUpRightDownLeft,
+        Grip::N | Grip::S => CursorStyle::ResizeUpDown,
+        Grip::E | Grip::W => CursorStyle::ResizeLeftRight,
+    }
 }
 
 /// A point inside the frame, given its position as fractions of the width/height.
@@ -632,6 +672,7 @@ impl View {
             grid: false,
             // On by default, the way the image viewer shows a transparent document.
             chessboard: true,
+            hover_cursor: CursorStyle::Arrow,
         }
     }
 
@@ -861,6 +902,9 @@ impl SvgEasyApp {
         let canvas = div()
             .size_full()
             .bg(theme::canvas_bg())
+            // Attached to the canvas so it applies only while the pointer is over it — the XML
+            // pane's own cursor takes over the moment the pointer leaves.
+            .cursor(self.view.hover_cursor)
             // Focusable so Delete / Escape / Ctrl+S land here after a click.
             .track_focus(&self.focus_handle)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_canvas_down))
@@ -1029,7 +1073,22 @@ impl SvgEasyApp {
                 });
                 cx.notify();
             }
-            None => {}
+            None => {
+                // Nothing is being dragged, so the pointer is only being read: keep the cursor in
+                // step with whatever it is over. Only a change repaints — gpui re-resolves the
+                // cursor from the last frame, so following every move would rebuild the whole
+                // element tree, XML pane included, for a pixel of arrow.
+                let wanted = match self.mapping() {
+                    Some(m) => {
+                        cursor_for(self.view.tool, self.editor.selection_frame(), &m, ev.position)
+                    }
+                    None => CursorStyle::Arrow,
+                };
+                if wanted != self.view.hover_cursor {
+                    self.view.hover_cursor = wanted;
+                    cx.notify();
+                }
+            }
         }
     }
 
@@ -1267,7 +1326,6 @@ mod tests {
 
     #[test]
     fn a_corner_grip_scales_both_axes_from_its_opposite_corner() {
-        let frame = [10.0, 20.0, 100.0, 50.0];
         // The south-east grip sits at (110, 70) with the north-west corner held at (10, 20).
         assert_eq!(scale_factors(Grip::Se, frame, (110.0, 70.0)), (1.0, 1.0));
         assert_eq!(scale_factors(Grip::Se, frame, (210.0, 120.0)), (2.0, 2.0));
