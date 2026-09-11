@@ -153,6 +153,19 @@ class SvgEditorPanel(
     /** Sidecar-rendered content frame for the current view; null = legacy in-process raster. */
     private var vpImage: BufferedImage? = null
 
+    /**
+     * Document source each cached content raster was rendered from (null = nothing cached).
+     *
+     * A raster must never outlive the document it depicts: an edit can be committed by a path
+     * that does not re-produce the frame (e.g. the element has no sidecar node id, so the move
+     * is applied to the local source only), and the canvas would then keep painting the
+     * pre-edit picture — the object visibly "snaps back to where it was" after the drag. The
+     * idle draw path compares these stamps against the live `engine.svgSource` and simply skips
+     * a stale raster; [refreshAfterEdit] then re-requests a frame for the new source.
+     */
+    private var vpSvg: String? = null
+    private var offscreenSvg: String? = null
+
     /** True when [vpImage] is a viewport frame (pasted at 0,0); false = full-canvas region frame. */
     private var vpViewportMode = false
 
@@ -929,7 +942,9 @@ class SvgEditorPanel(
         }
         if (scheduler == null) {
             offscreen = renderNow()
+            offscreenSvg = engine.svgSource
             vpImage = null
+            vpSvg = null
             vpPreview = null
             refreshPickNow()
             return
@@ -971,8 +986,10 @@ class SvgEditorPanel(
                 val cimg = result?.first
                 if (cimg != null) {
                     offscreen = cimg
+                    offscreenSvg = src
                     pickImage = result?.second
                     vpImage = null
+                    vpSvg = null
                     vpPreview = null
                     contentDown = 1.0 // legacy frames are always produced at full resolution
                     staticDirty = true
@@ -1045,7 +1062,9 @@ class SvgEditorPanel(
         val apply: (BufferedImage?) -> Unit = { result ->
             if (result != null && contentParams() == wanted && vpViewportMode == isViewport) {
                 vpImage = result
+                vpSvg = wanted.svg
                 offscreen = null
+                offscreenSvg = null
                 vpPreview = null
                 contentDown = wanted.down
                 staticDirty = true
@@ -1448,16 +1467,23 @@ class SvgEditorPanel(
             // commitSidecar — just drop the stale drag layers and re-warm them.
             clearLayers()
             staticDirty = true
+            // ...unless the edit did NOT go through the sidecar (the element carries no node id,
+            // so the move was rewritten into the local source only). Then the cached frame still
+            // depicts the pre-edit document and would paint the object back at its old spot;
+            // re-produce it for the new source instead.
+            if (vpSvg != engine.svgSource && offscreenSvg != engine.svgSource) requestContent()
             requestLayers(id)
             canvas.repaint()
             return
         }
         if (scheduler == null) {
             offscreen = renderNow()
+            offscreenSvg = engine.svgSource
             refreshPickNow()
             rebuildLayersSync(id)
         } else {
             offscreen = renderNow()
+            offscreenSvg = engine.svgSource
             refreshPickNow()
             clearLayers()
             staticDirty = true
@@ -2380,10 +2406,14 @@ class SvgEditorPanel(
             contentDown = 1.0 // commit frames are always full resolution
             if (vpViewportMode) {
                 vpImage = c.png
+                vpSvg = c.svg
                 offscreen = null
+                offscreenSvg = null
             } else {
                 offscreen = c.png
+                offscreenSvg = c.svg
                 vpImage = null
+                vpSvg = null
             }
             vpPreview = null
             staticDirty = true
@@ -2484,6 +2514,13 @@ class SvgEditorPanel(
     /** Test hook: current view scale (panel px per SVG unit). */
     fun debugViewScale(): Double = viewScale
 
+    /**
+     * Test hook: the document source the cached content raster depicts (null = no raster yet).
+     * The canvas only paints a raster whose stamp equals the live `svgSource`, so equal values
+     * here mean the picture on screen belongs to the current document.
+     */
+    fun debugContentSvg(): String? = vpSvg ?: offscreenSvg
+
     /** Test hook: replace the selection with `ids` (last member becomes primary). */
     fun debugSetSelection(ids: List<String>) {
         if (ids.isEmpty()) {
@@ -2559,14 +2596,20 @@ class SvgEditorPanel(
             // A sidecar frame may be a reduced-resolution burst frame: its natural draw size is
             // `contentDown`× the full size, so it is up-scaled by 1/contentDown to compensate.
             val pv = vpPreview
-            val vp = vpImage
+            // Only paint a raster that still depicts the CURRENT document: one rendered from a
+            // source that has since been edited would show the object at its previous position
+            // (the "it moved, then went back" symptom). A stale raster is skipped entirely; the
+            // edit paths re-request a fresh frame for the new source.
+            val src = engine.svgSource
+            val vp = vpImage?.takeIf { vpSvg == src }
+            val off = offscreen?.takeIf { offscreenSvg == src }
             when {
                 pv != null -> drawVpPreview(g, pv)
                 vp != null -> {
                     val up = 1.0 / contentDown
                     if (vpViewportMode) drawScaledAt(g, vp, 0.0, 0.0, up) else drawScaled(g, vp, up)
                 }
-                else -> offscreen?.let { drawScaled(g, it) }
+                off != null -> drawScaled(g, off)
             }
             staticDirty = true // ensure the next drag re-bakes with the current base raster
         }

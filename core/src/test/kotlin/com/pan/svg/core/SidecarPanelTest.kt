@@ -5,6 +5,45 @@ import org.junit.jupiter.api.Test
 import java.awt.Point
 
 class SidecarPanelTest {
+    /**
+     * Like [FakeSidecar], but its `open` reports no node ids: every element lands with `nodeId`
+     * 0, the shape a projection without editor node ids has. A move on such an element cannot be
+     * addressed by the sidecar (there is no node to commit against), so it is rewritten into the
+     * local source only — which used to leave the cached frame depicting the pre-edit document,
+     * i.e. the object visibly "goes back to where it was" after the drag.
+     */
+    private class NodeIdlessSidecar : FakeSidecar() {
+        override fun exchange(
+            method: String,
+            params: Map<String, Any?>,
+            timeoutMs: Long,
+        ): Any? {
+            val res = super.exchange(method, params, timeoutMs)
+            if (method != "open") return res
+            @Suppress("UNCHECKED_CAST")
+            val m = res as MutableMap<String, Any?>
+            m["elements"] = (m["elements"] as List<Map<String, Any?>>).map { it - "nodeId" }
+            return m
+        }
+    }
+
+    @Test
+    fun `a move the sidecar cannot address still refreshes the content frame`() {
+        NodeIdlessSidecar().use { fake ->
+            val panel = SvgEditorPanel(FakeSvgRenderer(), sidecar = fake)
+            panel.loadSvg(Samples.SIMPLE)
+            panel.debugSetSelection(listOf("box-a"))
+            panel.nudgeSelection(10.0, 0.0)
+            // No node id → nothing to commit through the sidecar; the move lands locally…
+            assertEquals(0, fake.count("commit"))
+            assertTrue(panel.svgSource.contains("translate(10"), "the move must reach the source")
+            // …and the canvas must then depict THAT source. Leaving the pre-edit raster cached
+            // would paint the object back at its old position after the drag.
+            assertEquals(panel.svgSource, panel.debugContentSvg())
+            panel.dispose()
+        }
+    }
+
     @Test
     fun `load adopts the sidecar layout with node ids`() {
         FakeSidecar().use { fake ->
