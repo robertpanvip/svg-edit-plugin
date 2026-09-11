@@ -1,0 +1,145 @@
+name: Build App
+
+# The desktop editor ships separately from the IntelliJ plugin (build-plugin.yml), so it gets its
+# own pipeline: every change under `native/` is built and tested on all three platforms, and a
+# version tag additionally publishes per-OS archives on the release.
+#
+# `tags` is combined with `paths` on purpose. GitHub does not evaluate path filters for tag
+# pushes, so a release always builds, while an ordinary push only builds when the native code
+# (or this file) changed.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths:
+      - 'native/**'
+      - '.github/workflows/build-app.yml'
+  pull_request:
+    paths:
+      - 'native/**'
+      - '.github/workflows/build-app.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  app:
+    name: svg_easy (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # gpui links against the system X11/Wayland/font libraries, so the -dev packages have to be
+      # installed for the build scripts (pkg-config) and for linking. The app itself needs no
+      # GPU to compile or to run its tests — they never open a window.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig1-dev libfreetype-dev libssl-dev libzstd-dev \
+            libwayland-dev libx11-dev libxcb1-dev libxcb-xkb-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev
+
+      # `rust-toolchain.toml` pins the compiler gpui-pre 0.3.x needs (older ones reject the
+      # standard-library features it calls), and that file stays the single source of truth.
+      - name: Install the pinned toolchain
+        shell: bash
+        working-directory: native/svg_easy
+        run: |
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "pinned toolchain: $channel"
+          rustup toolchain install "$channel" --profile minimal
+          rustup default "$channel"
+
+      - name: Cache the build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            native/resvg_bridge -> target
+            native/svg_easy -> target
+
+      - name: Test the engine
+        working-directory: native/resvg_bridge
+        run: cargo test --all-targets
+
+      - name: Test the app
+        working-directory: native/svg_easy
+        run: cargo test --all-targets
+
+      - name: Build the app
+        working-directory: native/svg_easy
+        run: cargo build --release --bin svg_easy
+
+      # A plain archive of the binary per OS — enough to run the editor without dragging an
+      # installer toolchain into CI. The name carries the OS and architecture so all three can
+      # sit side by side on the release.
+      - name: Package (Linux / macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -czf "dist/svg_easy-${{ runner.os }}-${{ runner.arch }}.tar.gz" \
+            -C native/svg_easy/target/release svg_easy
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path native/svg_easy/target/release/svg_easy.exe `
+            -DestinationPath "dist/svg_easy-${{ runner.os }}-${{ runner.arch }}.zip"
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@v5
+        with:
+          name: svg_easy-${{ runner.os }}-${{ runner.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish the archives
+    runs-on: ubuntu-latest
+    needs: app
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download the archives
+        uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Build Plugin publishes the same tag and may be creating that release at this very moment,
+      # so creating it here is best effort and the upload retries: whichever job arrives second
+      # simply adds its own files to the release the other one made.
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release create "$tag" --title "$tag" --generate-notes || true
+          for attempt in 1 2 3 4 5; do
+            gh release upload "$tag" dist/* --clobber && exit 0
+            sleep 10
+          done
+          echo "could not attach the archives to $tag" >&2
+          exit 1

@@ -32,11 +32,27 @@ mod theme;
 
 use std::path::PathBuf;
 
-use gpui::{App, AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
+use gpui::{
+    App, AppContext as _, Bounds, KeyBinding, NoAction, WindowBounds, WindowOptions, px, size,
+};
 use gpui_component::highlighter::{LanguageConfig, LanguageRegistry};
 use gpui_platform::application;
 
 use app::SvgEasyApp;
+
+/// Cancels the text area's own undo/redo bindings so the *document* history owns the keystrokes.
+///
+/// A keybinding is dispatched as an action before key events reach the element tree, and
+/// gpui-component binds Ctrl+Z/Ctrl+Y inside its text area. Left in place, one Ctrl+Z would undo
+/// the pane's private history and another the document's, and the two can drift apart. A global
+/// `NoAction` out-ranks context-scoped bindings, so this suppresses just those bindings and the
+/// keystroke falls through to `SvgEasyApp::on_capture_key`.
+fn own_undo_shortcuts(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("secondary-z", NoAction {}, None),
+        KeyBinding::new("secondary-y", NoAction {}, None),
+    ]);
+}
 
 /// Registers the SVG/XML grammar that gpui-component does not bundle.
 ///
@@ -64,6 +80,7 @@ fn main() {
     application().run(move |cx: &mut App| {
         // Must run before any gpui-component widget is built (theme, Root machinery, input, ...).
         gpui_component::init(cx);
+        own_undo_shortcuts(cx);
         register_xml_language();
 
         let bounds = Bounds::centered(None, size(px(1280.), px(860.)), cx);

@@ -69,6 +69,19 @@ impl Mat {
         }
     }
 
+    /// Rotation by `radians`, matching SVG's `rotate()` in the y-down user space.
+    pub fn rotate(radians: f64) -> Mat {
+        let (sin, cos) = radians.sin_cos();
+        Mat {
+            a: cos,
+            b: sin,
+            c: -sin,
+            d: cos,
+            e: 0.0,
+            f: 0.0,
+        }
+    }
+
     pub fn abs_scale(self) -> f64 {
         self.a
             .abs()
@@ -188,16 +201,7 @@ pub fn parse_transform(s: &str) -> Mat {
                 Mat::scale(sx, sy)
             }
             "rotate" => {
-                let ang = nums.first().copied().unwrap_or(0.0).to_radians();
-                let (cos, sin) = (ang.cos(), ang.sin());
-                let r = Mat {
-                    a: cos,
-                    b: sin,
-                    c: -sin,
-                    d: cos,
-                    e: 0.0,
-                    f: 0.0,
-                };
+                let r = Mat::rotate(nums.first().copied().unwrap_or(0.0).to_radians());
                 if nums.len() >= 3 {
                     let (cx, cy) = (nums[1], nums[2]);
                     Mat::translate(cx, cy).mul(r).mul(Mat::translate(-cx, -cy))

@@ -7,7 +7,7 @@ use std::sync::{Arc, LazyLock};
 use resvg::tiny_skia;
 use usvg::{tiny_skia_path, Node, Options, Tree};
 
-use crate::dom::{Document, Mode};
+use crate::dom::{Document, Mode, Stack};
 use crate::geom::{fmt_transform, Mat};
 
 const MAX_PX: u32 = 16384;
@@ -109,28 +109,40 @@ impl Session {
         collect_group_boxes(self.tree.root(), &mut self.boxes);
     }
 
-    /// Element list in document (paint) order for the Kotlin layer panel.
+    /// Element list in paint order — oldest sibling first, so the *last* entry is drawn on top —
+    /// for the layer panel. `depth` is how deep the element sits in the tree.
     pub fn layout_json(&self) -> serde_json::Value {
         let mut arr = Vec::new();
-        for idx in self.doc.element_indices() {
-            let el = self.doc.element(idx).unwrap();
+        self.collect_layout(0, 0, &mut arr);
+        serde_json::json!({ "width": self.width, "height": self.height, "elements": arr })
+    }
+
+    /// Walks the *tree* rather than the arena, because a restack changes paint order without
+    /// touching the arena, and the panel has to show the order that is actually painted.
+    fn collect_layout(&self, idx: usize, depth: usize, out: &mut Vec<serde_json::Value>) {
+        let Some(el) = self.doc.element(idx) else {
+            return;
+        };
+        if idx != 0 {
             let user_id = el.attr("id");
             let key = user_id.clone().unwrap_or_else(|| format!("e{}", el.node_id));
-            let (x, y, w, h) = match self.boxes.get(&key) {
-                Some(&[x, y, w, h]) => (x, y, w, h),
-                None => continue, // not projected (e.g. inside <defs>)
-            };
-            arr.push(serde_json::json!({
-                "nodeId": el.node_id,
-                "id": user_id,
-                "tag": el.name,
-                "x": x,
-                "y": y,
-                "w": w,
-                "h": h,
-            }));
+            if let Some(&[x, y, w, h]) = self.boxes.get(&key) {
+                out.push(serde_json::json!({
+                    "nodeId": el.node_id,
+                    "id": user_id,
+                    "tag": el.name,
+                    "depth": depth,
+                    "x": x,
+                    "y": y,
+                    "w": w,
+                    "h": h,
+                }));
+            }
         }
-        serde_json::json!({ "width": self.width, "height": self.height, "elements": arr })
+        let child_depth = if idx == 0 { 0 } else { depth + 1 };
+        for &child in &el.children {
+            self.collect_layout(child, child_depth, out);
+        }
     }
 
     /// Topmost element whose geometry contains (x, y) within `tol` root units.
@@ -517,6 +529,52 @@ pub struct DragImages {
     pub h: u32,
 }
 
+/// The pair of layers a live drag paints, in **document space**.
+///
+/// Both are rendered at the same scale and therefore share pixel dimensions, so the ghost can be
+/// blitted over the background with nothing but a translation, and the two line up exactly. An
+/// interactive canvas uses this to move a shape with the cursor without re-rendering the document
+/// on every mouse move.
+pub struct DragLayers {
+    /// Premultiplied RGBA8 of the document with the dragged subtrees cut out.
+    pub bg: (Vec<u8>, u32, u32),
+    /// Premultiplied RGBA8 of just the dragged subtrees (plus the groups they live in, so their
+    /// inherited transforms still apply).
+    pub ghost: (Vec<u8>, u32, u32),
+}
+
+impl Session {
+    /// Renders the background/ghost pair for dragging `node_ids`, in document space at `scale`.
+    pub fn drag_layers_rgba(&self, node_ids: &[usize], scale: f64) -> Result<DragLayers, String> {
+        if node_ids.is_empty() {
+            return Err("nothing to drag".to_string());
+        }
+        // `Mode::HideMany` keys on DOM node ids (what the caller passes); `Mode::Solo` keys on
+        // arena indices (`path_to` returns those) — keep each in its own space.
+        let marked: HashSet<usize> = node_ids.iter().copied().collect();
+        let mut chain: HashSet<usize> = HashSet::new();
+        for &id in node_ids {
+            let idx = self
+                .doc
+                .find_by_node_id(id)
+                .ok_or_else(|| format!("unknown nodeId {id}"))?;
+            chain.extend(self.doc.path_to(idx));
+        }
+
+        let bg = render_scaled_rgba(&self.doc.serialize(&Mode::HideMany(marked)), scale)?;
+        let ghost = render_scaled_rgba(&self.doc.serialize(&Mode::Solo(chain)), scale)?;
+        if (bg.1, bg.2) != (ghost.1, ghost.2) {
+            // Both come from the same root `<svg>`, so this can only mean the document changed
+            // shape underneath us; a mismatched pair would misalign on screen.
+            return Err(format!(
+                "drag layers disagree on size: {}x{} vs {}x{}",
+                bg.1, bg.2, ghost.1, ghost.2
+            ));
+        }
+        Ok(DragLayers { bg, ghost })
+    }
+}
+
 impl Session {
     /// One-shot pre-render for a drag gesture: the background with the dragged
     /// subtree cut out, plus a ghost image containing only that subtree.
@@ -697,6 +755,21 @@ impl Session {
         Ok(self.doc.serialize(&Mode::Full))
     }
 
+    /// Restacks `node_id` among its siblings and returns the updated document source.
+    ///
+    /// Asking for a position the element already holds returns the source unchanged — the caller
+    /// compares it against the current text to tell an edit from a no-op.
+    pub fn restack(&mut self, node_id: usize, to: Stack) -> Result<String, String> {
+        let idx = self
+            .doc
+            .find_by_node_id(node_id)
+            .ok_or_else(|| format!("unknown nodeId {node_id}"))?;
+        if self.doc.restack(idx, to) {
+            self.rebuild_projection()?;
+        }
+        Ok(self.doc.serialize(&Mode::Full))
+    }
+
     /// Re-renders the current document under a viewport transform
     /// (pan `tx/ty` in pixels, uniform `scale`). This is the viewBox zoom.
     pub fn render_viewport(
@@ -778,6 +851,55 @@ mod tests {
         // dot sits inside a translated group: ancestor transform applied.
         let (x, y, w, h) = box_of(&layout, 6);
         assert_eq!((x, y, w, h), (110.0, 70.0, 20.0, 20.0));
+    }
+
+    #[test]
+    fn layout_lists_nesting_depth() {
+        let s = Session::new(SAMPLE).unwrap();
+        let depth = |node_id: u64| {
+            s.layout_json()["elements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|e| e["nodeId"].as_u64() == Some(node_id))
+                .map(|e| e["depth"].as_u64().unwrap())
+        };
+        assert_eq!(depth(2), Some(1), "bg sits directly under <svg>");
+        assert_eq!(depth(5), Some(1), "so does the group");
+        assert_eq!(depth(6), Some(2), "the dot is one level further in");
+    }
+
+    #[test]
+    fn restack_changes_paint_order_and_the_layout_listing() {
+        let mut s = Session::new(SAMPLE).unwrap();
+        let ids = |s: &Session| -> Vec<u64> {
+            s.layout_json()["elements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["nodeId"].as_u64().unwrap())
+                .collect()
+        };
+        // `bg` is an opaque rect covering the whole canvas, so the topmost shape wins the hit.
+        assert_eq!(s.hit_test(30.0, 30.0, 0.5), Some(3), "box-a starts over bg");
+        assert_eq!(&ids(&s)[..5], &[2, 3, 4, 5, 6]);
+
+        s.restack(3, Stack::Back).unwrap();
+        assert_eq!(s.hit_test(30.0, 30.0, 0.5), Some(2), "bg now paints over box-a");
+        assert_eq!(
+            &ids(&s)[..5],
+            &[3, 2, 4, 5, 6],
+            "the listing follows paint order, not the arena",
+        );
+
+        // The moved element keeps its original text, and a restack onto its own position leaves
+        // the source untouched — which is how the caller tells an edit from a no-op.
+        let svg = s.doc.serialize(&Mode::Full);
+        assert!(svg.contains("<!-- drawn by hand -->"));
+        assert!(svg.contains("<path id='box-a' d='M10 10 H60 V60 H10 Z' fill='#f00'/>"));
+        assert_eq!(s.restack(3, Stack::Back).unwrap(), svg);
+
+        assert!(s.restack(9999, Stack::Front).is_err(), "unknown node");
     }
 
     #[test]
@@ -934,6 +1056,62 @@ mod tests {
             (w as u64) * (h as u64) <= 4096 * 4096,
             "the pixel budget must cap the raster, got {w}x{h}",
         );
+    }
+
+    #[test]
+    fn drag_layers_cut_the_shape_out_of_the_background_and_line_up() {
+        let s = Session::new(SAMPLE).unwrap();
+        let layers = s.drag_layers_rgba(&[3], 2.0).unwrap();
+        let (w, h) = (layers.bg.1, layers.bg.2);
+        assert_eq!((w, h), (400, 240), "document space at the requested scale");
+        assert_eq!(
+            (layers.ghost.1, layers.ghost.2),
+            (w, h),
+            "the pair must share dimensions or the ghost would not line up",
+        );
+
+        let at = |layer: &(Vec<u8>, u32, u32), x: u32, y: u32| {
+            let i = ((y * layer.1 + x) * 4) as usize;
+            [layer.0[i], layer.0[i + 1], layer.0[i + 2], layer.0[i + 3]]
+        };
+        // `box-a` is the red box spanning (10,10)-(60,60) document units, so (35,35) at scale 2
+        // lands at pixel (70,70).
+        let ghost = at(&layers.ghost, 70, 70);
+        assert!(
+            ghost[0] > 200 && ghost[1] < 40 && ghost[3] > 200,
+            "the ghost keeps the dragged shape: {ghost:?}",
+        );
+        let bg = at(&layers.bg, 70, 70);
+        assert!(
+            bg[1] > 200 && bg[2] > 200,
+            "the shape is cut out of the background, revealing the root rect: {bg:?}",
+        );
+
+        // The ghost holds the dragged subtree and nothing else…
+        assert_eq!(
+            at(&layers.ghost, 300, 40),
+            [0, 0, 0, 0],
+            "the ghost must not paint the rest of the document",
+        );
+
+        // …and both layers agree with a plain render of the document wherever they do paint, which
+        // is what makes the ghost land exactly on top of the hole it was cut from.
+        let full = render_scaled_rgba(SAMPLE, 2.0).unwrap();
+        assert_eq!(
+            at(&full, 70, 70),
+            at(&layers.ghost, 70, 70),
+            "the ghost sits where the shape sits",
+        );
+        assert_eq!(
+            at(&full, 300, 40),
+            at(&layers.bg, 300, 40),
+            "the background matches the document away from the drag",
+        );
+
+        // A group drag keeps its members together and honours the requested set.
+        assert!(s.drag_layers_rgba(&[], 1.0).is_err(), "nothing to drag");
+        assert!(s.drag_layers_rgba(&[9999], 1.0).is_err(), "unknown node");
+        assert!(s.drag_layers_rgba(&[3, 6], 1.0).is_ok(), "multi-selection");
     }
 
     mod base64_png {

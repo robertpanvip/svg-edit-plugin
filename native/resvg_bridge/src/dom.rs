@@ -84,6 +84,18 @@ pub enum NodeKind {
     Decl(String),
 }
 
+/// Where a restack moves an element among its siblings.
+///
+/// SVG has no z-index: later siblings paint over earlier ones, so `Front` is the top of the
+/// stack and `Back` its bottom.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Stack {
+    Front,
+    Forward,
+    Backward,
+    Back,
+}
+
 /// How serialization should treat the tree.
 pub enum Mode {
     /// Round-trip: untouched source is copied verbatim.
@@ -266,6 +278,52 @@ impl Document {
             // from the tree instead of copied verbatim from the source span.
             parent_el.dirty = true;
         }
+    }
+
+    /// Moves `idx` among its sibling *elements*, which is what changes paint order.
+    ///
+    /// Only the element's slot in the parent's child list moves; the text and comment nodes
+    /// around it stay where they are, so the document keeps its indentation when it is
+    /// re-serialized. Returns false when the element is already where it was asked to go.
+    pub fn restack(&mut self, idx: usize, to: Stack) -> bool {
+        if idx == 0 || self.removed[idx] {
+            return false;
+        }
+        let Some(parent) = self.element(idx).map(|e| e.parent) else {
+            return false;
+        };
+        let Some(parent_el) = self.element(parent) else {
+            return false;
+        };
+        let siblings: Vec<usize> = parent_el
+            .children
+            .iter()
+            .copied()
+            .filter(|&c| matches!(self.nodes[c], NodeKind::Element(_)))
+            .collect();
+        let Some(pos) = siblings.iter().position(|&c| c == idx) else {
+            return false;
+        };
+        let target = match to {
+            Stack::Front => siblings.len() - 1,
+            Stack::Back => 0,
+            Stack::Forward if pos + 1 < siblings.len() => pos + 1,
+            Stack::Backward if pos > 0 => pos - 1,
+            _ => return false,
+        };
+        if target == pos {
+            return false;
+        }
+
+        let other = siblings[target];
+        let children = &mut self.element_mut(parent).expect("checked above").children;
+        let a = children.iter().position(|&c| c == idx).expect("sibling");
+        let b = children.iter().position(|&c| c == other).expect("sibling");
+        children.swap(a, b);
+        // The parent's content changed, so it (and its ancestors) must be re-serialized from the
+        // tree instead of copied verbatim from the source span.
+        self.element_mut(parent).expect("checked above").dirty = true;
+        true
     }
 
     /// Chain of arena indices from the root (inclusive) down to `idx`.
@@ -724,6 +782,49 @@ mod tests {
         assert!(!out.contains("id='box-a'"));
         assert!(!out.contains("id='bg'"));
         assert!(!out.contains("<text"));
+    }
+
+    #[test]
+    fn restack_swaps_sibling_slots_and_keeps_the_document_formatted() {
+        let mut doc = Document::parse(SAMPLE);
+        let box_a = doc.find_by_node_id(3).unwrap();
+
+        assert!(doc.restack(box_a, Stack::Front), "box-a moves to the top");
+        let out = doc.serialize(&Mode::Full);
+        let at = |needle: &str| out.find(needle).unwrap_or_else(|| panic!("missing {needle}"));
+        assert!(at("id='bg'") < at("id='label'"));
+        assert!(at("id='label'") < at("id='grp'"));
+        assert!(at("id='grp'") < at("id='box-a'"), "the topmost sibling is written last");
+        // Everything else survives verbatim…
+        assert!(out.contains("<!-- drawn by hand -->"));
+        assert!(out.contains("<rect id='bg' x='0' y='0' width='200' height='120' fill='#eef'/>"));
+        // …and the moved element keeps its own line and indentation, because only the *slots*
+        // were swapped, not the whitespace between them.
+        assert!(out.contains("\n  <path id='box-a' d='M10 10 H60 V60 H10 Z' fill='#f00'/>\n</svg>"));
+
+        assert!(!doc.restack(box_a, Stack::Front), "already on top");
+        assert!(doc.restack(box_a, Stack::Backward), "one step down");
+        let out = doc.serialize(&Mode::Full);
+        assert!(out.find("id='box-a'").unwrap() < out.find("id='grp'").unwrap());
+    }
+
+    #[test]
+    fn restack_refuses_where_there_is_nowhere_to_go() {
+        let mut doc = Document::parse(SAMPLE);
+        // `bg` is the oldest sibling, so it is already at the bottom of the stack.
+        let bg = doc.find_by_node_id(2).unwrap();
+        assert!(!doc.restack(bg, Stack::Backward), "nothing below it");
+        assert!(!doc.restack(bg, Stack::Back), "…and Back lands where it already is");
+        assert!(doc.restack(bg, Stack::Forward), "one step towards the front");
+        assert!(doc.restack(bg, Stack::Back), "and back down");
+        assert!(!doc.restack(bg, Stack::Back), "where it now already is");
+
+        // The root <svg> is the only element inside #document, so it has no siblings to swap with.
+        let svg = doc.find_by_node_id(1).unwrap();
+        assert!(!doc.restack(svg, Stack::Front));
+        assert!(!doc.restack(svg, Stack::Back));
+        // The document element itself is not restackable either.
+        assert!(!doc.restack(0, Stack::Front));
     }
 
     #[test]
