@@ -20,6 +20,10 @@ repositories {
 dependencies {
     implementation(project(":core"))
 
+    // The IntelliJ Platform provides kotlin-stdlib at runtime (see gradle.properties), so it is
+    // compile-only here — bundling it added ~1.6 MB to every plugin zip.
+    compileOnly(kotlin("stdlib"))
+
     intellijPlatform {
         // The IntelliJ SDK used to build & run the plugin.
         // NOTE: in IntelliJ Platform Gradle Plugin 2.1.0 the dependency function is named
@@ -34,6 +38,11 @@ dependencies {
 
 kotlin {
     jvmToolchain(17)
+    compilerOptions {
+        // Runs on the platform's bundled kotlin-stdlib 1.9.0 (IDEA 2023.2) — reject any stdlib API
+        // newer than 1.9 at compile time, so a missing symbol can never surface at runtime.
+        apiVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_1_9)
+    }
 }
 
 intellijPlatform {

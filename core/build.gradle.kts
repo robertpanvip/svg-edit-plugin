@@ -18,6 +18,10 @@ dependencies {
     compileOnly("net.java.dev.jna:jna:5.14.0")
     testImplementation("net.java.dev.jna:jna:5.14.0")
 
+    // The Kotlin stdlib is NOT bundled: the IntelliJ Platform provides it at runtime (see
+    // gradle.properties). `compileOnly` keeps it on the compile classpath only.
+    compileOnly(kotlin("stdlib"))
+
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
     testImplementation("org.junit.jupiter:junit-jupiter-params:5.10.2")
@@ -27,6 +31,11 @@ dependencies {
 
 kotlin {
     jvmToolchain(17)
+    compilerOptions {
+        // core is packaged into the plugin, where it runs against the platform's bundled
+        // kotlin-stdlib 1.9.0 — reject any stdlib API newer than 1.9 at compile time.
+        apiVersion.set(org.jetbrains.kotlin.gradle.dsl.KotlinVersion.KOTLIN_1_9)
+    }
 }
 
 tasks.test {

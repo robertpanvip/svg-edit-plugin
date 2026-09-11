@@ -10,6 +10,9 @@ repositories {
 dependencies {
     // The editor core (renderer interface, panel, engine, collision detection).
     implementation(project(":core"))
+    // The standalone runtime has no IntelliJ Platform to supply the Kotlin stdlib, so it bundles
+    // its own (core/plugin declare it compileOnly — see gradle.properties).
+    implementation(kotlin("stdlib"))
     // FlatLaf: the same Look & Feel IntelliJ IDEA ships with (FlatIntelliJLaf = IntelliJ Light,
     // FlatDarculaLaf = Darcula). Makes the standalone app look IDEA-consistent.
     implementation("com.formdev:flatlaf:3.7.2")
