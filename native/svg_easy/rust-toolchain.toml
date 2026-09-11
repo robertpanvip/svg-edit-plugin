@@ -1,0 +1,4 @@
+[toolchain]
+# `gpui-pre` 0.3.x calls std-library features (`slice_as_array`, `cold_path`) that are not stable
+# on older compilers; anything below this fails with "use of unstable library feature".
+channel = "1.98.1"

@@ -1,0 +1,30 @@
+[package]
+name = "svg_easy"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The standalone SVG Easy editor: one native binary, no JVM, no IntelliJ plugin host.
+#
+# Version pairing is deliberate and pinned. GPUI is published as a set of snapshot crates and they
+# must move together:
+#   gpui-pre          -> lib `gpui`              (framework)
+#   gpui-pre-platform -> lib `gpui_platform`     (windowing/text backends + `application()`)
+#   gpui-component    -> widgets + code editor, built against `gpui-pre` ^0.3.1
+# All are pre-1.0 and drift between releases, so bump them as a set.
+#
+# The toolchain is pinned in `rust-toolchain.toml`: `gpui-pre` 0.3.x uses std features that are
+# not stable on older compilers and fails to build below 1.98.
+[dependencies]
+gpui-pre = "0.3.4"
+gpui-pre-platform = { version = "0.3.4", features = ["font-kit", "wayland", "x11"] }
+# `tree-sitter` turns on the editor's highlighting machinery. The XML grammar itself is registered
+# by hand at startup, because gpui-component bundles no XML grammar — see `main.rs`.
+gpui-component = { version = "0.6.1", features = ["tree-sitter"] }
+tree-sitter-xml = "0.7"
+# The rendering engine, shared with the IntelliJ plugin. Here it is linked in-process: no sidecar,
+# no JSON-RPC, no JNA — the app calls `Session` directly.
+resvg_bridge = { path = "../resvg_bridge" }
+# Must match the `image` version gpui-pre uses: `RenderImage` is built from `image::Frame` values.
+image = "0.25"
+serde_json = "1"

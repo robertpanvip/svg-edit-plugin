@@ -472,6 +472,44 @@ pub fn render_fit_rgba(svg: &str, fit_w: u32, fit_h: u32) -> Result<(Vec<u8>, u3
     Ok((pm.take(), pw, ph))
 }
 
+/// Render `svg` at a uniform `scale` (document units -> pixels), with **no fit box**.
+///
+/// This is what an in-process viewer wants: the caller paints the pixels through a GPU
+/// transform, so panning costs nothing and only a zoom that outgrows the current raster needs
+/// another render. The scale is silently reduced if the result would exceed a 4096x4096 budget,
+/// so a zoomed-in render can never allocate gigabytes.
+pub fn render_scaled_rgba(svg: &str, scale: f64) -> Result<(Vec<u8>, u32, u32), String> {
+    const BUDGET: f64 = 4096.0 * 4096.0;
+
+    let tree = Tree::from_str(svg, &usvg_options()).map_err(|e| e.to_string())?;
+    let size = tree.size();
+    let (sw, sh) = (size.width() as f64, size.height() as f64);
+
+    let mut s = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    // Cap the scale so the frame fits the budget. When that cap bites, the dimensions are then
+    // rounded *down*: the cap was chosen to fill the budget exactly, so rounding up would put the
+    // product back over it.
+    let max_scale = (BUDGET / (sw.max(1.0) * sh.max(1.0))).sqrt();
+    let capped = s > max_scale;
+    if capped {
+        s = max_scale;
+    }
+    let round = if capped { f64::floor } else { f64::ceil };
+    let pw = (round(sw * s).max(1.0) as u32).clamp(1, MAX_PX);
+    let ph = (round(sh * s).max(1.0) as u32).clamp(1, MAX_PX);
+    let mut pm = tiny_skia::Pixmap::new(pw, ph).ok_or_else(|| "pixmap alloc failed".to_string())?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(s as f32, s as f32),
+        &mut pm.as_mut(),
+    );
+    Ok((pm.take(), pw, ph))
+}
+
 pub struct DragImages {
     pub bg_png: Vec<u8>,
     pub ghost_png: Vec<u8>,
@@ -617,6 +655,46 @@ impl Session {
             "h": vh.clamp(1, MAX_PX),
             "elements": self.layout_json()["elements"],
         }))
+    }
+
+    /// Applies `m` — a delta matrix in root/canvas space — to `node_id`'s own `transform`
+    /// attribute and returns the updated document source.
+    ///
+    /// This is the non-rendering half of [Self::commit]. An in-process app (the GPUI editor)
+    /// paints the result itself, so asking the engine for a base64 PNG would only cost time and
+    /// an allocation; the sidecar keeps using `commit` because its clients are across a process
+    /// boundary.
+    pub fn apply_transform(&mut self, node_id: usize, m: Mat) -> Result<String, String> {
+        let idx = self
+            .doc
+            .find_by_node_id(node_id)
+            .ok_or_else(|| format!("unknown nodeId {node_id}"))?;
+        let a = self.doc.ancestor_transform(idx);
+        let el = self.doc.element_mut(idx).unwrap();
+        let t_old = el.transform_mat();
+        let t_new = a
+            .invert()
+            .unwrap_or(Mat::IDENTITY)
+            .mul(m)
+            .mul(a)
+            .mul(t_old);
+        el.set_attr("transform", &fmt_transform(t_new));
+
+        self.rebuild_projection()?;
+        Ok(self.doc.serialize(&Mode::Full))
+    }
+
+    /// Removes the subtree rooted at `node_id` and returns the updated document source.
+    ///
+    /// The non-rendering half of [Self::remove], for the same reason as [Self::apply_transform].
+    pub fn remove_subtree(&mut self, node_id: usize) -> Result<String, String> {
+        let idx = self
+            .doc
+            .find_by_node_id(node_id)
+            .ok_or_else(|| format!("unknown nodeId {node_id}"))?;
+        self.doc.remove_node(idx);
+        self.rebuild_projection()?;
+        Ok(self.doc.serialize(&Mode::Full))
     }
 
     /// Re-renders the current document under a viewport transform
@@ -806,6 +884,56 @@ mod tests {
         assert_eq!(out["h"], 240);
         let png = base64_png::decode(out["png"].as_str().unwrap());
         assert_eq!(&png[..4], b"\x89PNG");
+    }
+
+    #[test]
+    fn apply_transform_agrees_with_commit_and_keeps_roundtrip_fidelity() {
+        // The GPUI app uses `apply_transform` instead of `commit` only because it paints the
+        // result itself — the document edit must be byte-identical.
+        let mut lean = Session::new(SAMPLE).unwrap();
+        let mut full = Session::new(SAMPLE).unwrap();
+        lean.apply_transform(3, Mat::translate(5.0, 7.0)).unwrap();
+        full.commit(3, Mat::translate(5.0, 7.0), 400, 240, 2.0, 0.0, 0.0)
+            .unwrap();
+        assert_eq!(
+            lean.doc.serialize(&Mode::Full),
+            full.doc.serialize(&Mode::Full),
+        );
+
+        let mut s = Session::new(SAMPLE).unwrap();
+        s.apply_transform(3, Mat::translate(5.0, 0.0)).unwrap();
+        let svg = s.apply_transform(3, Mat::translate(5.0, 0.0)).unwrap();
+        assert!(svg.contains("transform=\"translate(10 0)\""));
+        // Round-trip fidelity survives: comments and untouched attributes verbatim.
+        assert!(svg.contains("<!-- drawn by hand -->"));
+        assert!(svg.contains("<rect id='bg' x='0' y='0' width='200' height='120' fill='#eef'/>"));
+        // The projection is rebuilt, so hit testing and layout follow the edit.
+        assert_eq!(box_of(&s.layout_json(), 3).0, 20.0);
+        assert!(s.apply_transform(9999, Mat::IDENTITY).is_err());
+    }
+
+    #[test]
+    fn remove_subtree_matches_remove_without_rendering() {
+        let mut s = Session::new(SAMPLE).unwrap();
+        let svg = s.remove_subtree(3).unwrap();
+        assert!(!svg.contains("box-a"), "deleted element must leave the source");
+        assert!(svg.contains("id='bg'"), "siblings survive untouched");
+        assert!(s.remove_subtree(3).is_err(), "double delete must error");
+    }
+
+    #[test]
+    fn render_scaled_rgba_honours_scale_and_caps_the_budget() {
+        let (rgba, w, h) = render_scaled_rgba(SAMPLE, 2.0).unwrap();
+        assert_eq!((w, h), (400, 240));
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+        assert!(rgba.chunks_exact(4).any(|px| px[3] > 0), "must paint");
+
+        // An absurd zoom is clamped instead of allocating gigabytes.
+        let (_, w, h) = render_scaled_rgba(SAMPLE, 10_000.0).unwrap();
+        assert!(
+            (w as u64) * (h as u64) <= 4096 * 4096,
+            "the pixel budget must cap the raster, got {w}x{h}",
+        );
     }
 
     mod base64_png {
