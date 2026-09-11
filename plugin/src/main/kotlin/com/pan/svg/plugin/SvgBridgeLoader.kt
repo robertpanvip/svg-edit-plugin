@@ -106,21 +106,32 @@ object SvgBridgeLoader {
     private fun loadOnce(): SvgRenderer? {
         attempts.clear()
         LOG.info("bridge: loadOrNull start, platform=${platformLabel()}, override=${System.getProperty(LIB_PATH_PROPERTY)}")
+
+        val jnaStart = System.nanoTime()
         bootstrapJna()
+        logTimed("jna bootstrap (jnidispatch locate/extract)", jnaStart)
 
         // 0) Explicit override: -Dsvg.editor.native.lib=/abs/path
         System.getProperty(LIB_PATH_PROPERTY)?.takeIf { it.isNotBlank() }?.let { path ->
             try {
-                return ResvgBridge.load(path).also { record("$LIB_PATH_PROPERTY=$path", true, null) }
+                return ResvgBridge.load(path).also {
+                    record("$LIB_PATH_PROPERTY=$path", true, null)
+                    logTimed("jna Native.load (proxy+dlopen) override=$path", jnaStart)
+                }
             } catch (t: Throwable) {
                 record("$LIB_PATH_PROPERTY=$path", false, t)
             }
         }
 
         // 1) Extract the bundled native lib from the classpath (jar) to a temp file.
+        val extractStart = System.nanoTime()
         extractBundled()?.let { path ->
             try {
-                return ResvgBridge.load(path).also { record("bundled $path", true, null) }
+                return ResvgBridge.load(path).also {
+                    logTimed("native extract (jar->stable file)", extractStart)
+                    record("bundled $path", true, null)
+                    logTimed("jna Native.load (proxy+dlopen) bundled=$path", jnaStart)
+                }
             } catch (t: Throwable) {
                 record("bundled (jar) $path", false, t)
             }
@@ -130,8 +141,10 @@ object SvgBridgeLoader {
         val configCandidate = configDir().resolve(nativeLibName())
         if (configCandidate.isFile) {
             try {
-                return ResvgBridge.load(configCandidate.absolutePath)
-                    .also { record(configCandidate.absolutePath, true, null) }
+                return ResvgBridge.load(configCandidate.absolutePath).also {
+                    logTimed("jna Native.load (proxy+dlopen) config=$configCandidate", jnaStart)
+                    record(configCandidate.absolutePath, true, null)
+                }
             } catch (t: Throwable) {
                 record(configCandidate.absolutePath, false, t)
             }
@@ -148,13 +161,21 @@ object SvgBridgeLoader {
             )
         for (c in candidates) {
             try {
-                return ResvgBridge.load(c).also { record(c, true, null) }
+                return ResvgBridge.load(c).also {
+                    logTimed("jna Native.load (proxy+dlopen) $c", jnaStart)
+                    record(c, true, null)
+                }
             } catch (t: Throwable) {
                 record(c, false, t)
             }
         }
         LOG.warn("bridge: all lookups failed\n${describeAttempts()}")
         return null
+    }
+
+    private fun logTimed(label: String, sinceNanos: Long) {
+        val ms = (System.nanoTime() - sinceNanos) / 1_000_000
+        LOG.info("bridge: $label = ${ms}ms")
     }
 
     /** Multi-line description of the attempts made by the last [loadOrNull] call. */
