@@ -46,6 +46,23 @@ class SidecarPanelTest {
     }
 
     @Test
+    fun `arrow nudge commits through the sidecar so the move is visible`() {
+        FakeSidecar().use { fake ->
+            val panel = SvgEditorPanel(FakeSvgRenderer(), sidecar = fake)
+            panel.loadSvg(Samples.SIMPLE)
+            panel.debugSetSelection(listOf("dot")) // nodeId 3
+            panel.nudgeSelection(10.0, 0.0)
+            // The commit must reach the sidecar (whose tree is what actually renders), not just
+            // touch the local engine copy — otherwise the element stays visually put.
+            assertEquals(1, fake.count("commit"))
+            val params = fake.paramsOf("commit")
+            assertEquals(3L, (params["nodeId"] as Number).toLong())
+            assertEquals(listOf(1.0, 0.0, 0.0, 1.0, 10.0, 0.0), params["matrix"])
+            panel.dispose()
+        }
+    }
+
+    @Test
     fun `release lands at the release point even when it lags the last drag frame`() {
         FakeSidecar().use { fake ->
             val panel = SvgEditorPanel(FakeSvgRenderer(), sidecar = fake)

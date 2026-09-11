@@ -550,10 +550,28 @@ class SvgEditorPanel(
     /** Nudge the selection by `(dx, dy)` canvas units (arrow keys). */
     fun nudgeSelection(dx: Double, dy: Double) {
         if (selectedIds.isEmpty()) return
+        if (dx == 0.0 && dy == 0.0) return
+        // Route through the same commit path as a drag so the move reaches the source that is
+        // actually rendered. In sidecar mode the canvas paints the sidecar's own document tree,
+        // not the panel's local engine copy, so a local-only engine.moveElement would leave the
+        // element visually stuck while every other mechanism (drag) commits through the sidecar.
+        val sc = sidecar
+        val viaSidecar = sc != null && sidecarActive
         var changed = false
-        for (id in selectedIds.toList()) changed = engine.moveElement(id, dx, dy) || changed
+        // Each commit refreshes the source + layout, so resolve every element fresh inside the
+        // loop (mirrors what the group-move drag path does).
+        for (id in selectedIds.toList()) {
+            val el = engine.layout.byId(id) ?: continue
+            val moved =
+                if (viaSidecar && el.nodeId != 0L) {
+                    commitSidecar(InteractionController.EditResult.Move(el, dx, dy)) == true
+                } else {
+                    engine.moveElement(id, dx, dy)
+                }
+            if (moved) changed = true
+        }
         if (changed) onEdit?.invoke()
-        if (changed) refreshStructural(selectedId)
+        if (changed) refreshAfterEdit(selectedId ?: selectedIds.last())
         emitStatus()
     }
 
