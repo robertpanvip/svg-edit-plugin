@@ -25,38 +25,29 @@ cd native/resvg_bridge && cargo test && cargo build --release
 ./gradlew :plugin:runIde
 ```
 
-## 独立运行（exe，无需 IDEA）
+## 独立运行（原生 app，无需 IDEA 也无需 JVM）
 
-除了 IDEA 插件形态，本项目还包含一个 **IntelliJ 无关的独立运行时**：直接用 `resvg` 渲染、
-做碰撞检测与拖拽编辑，打包成双击即运行、内嵌 JRE 的 `.exe`。非常适合本地随手测试。
+除了 IDEA 插件形态，本项目还包含一个**完全独立的桌面编辑器** `native/svg_easy`：纯 Rust + GPUI
+的单文件二进制，进程内直连 `resvg_bridge` 渲染，没有 JVM、没有宿主进程、没有 sidecar。
 
 ```bash
-# 1) 先把原生库编进资源（仅首次 / 重新编译 resvg 后需要）
-cp native/resvg_bridge/target/debug/resvg_bridge.dll app/src/main/resources/native/resvg_bridge.dll
+# 运行（不带参数则打开内置示例文档）
+cd native/svg_easy && cargo run
+cargo run -- path/to/file.svg     # 打开文件，Ctrl+S 写回
 
-# 2) 运行（GUI 模式；也可加 --smoke 做无头自测）
-./gradlew :app:run
-./gradlew :app:run --args="--smoke"
-
-# 3) 打包成独立 exe（产物：app/build/dist/SvgEditor/SvgEditor.exe，含 runtime/ 内嵌 JRE）
-./gradlew :app:packageExe
-# 再打个 zip 便于分发：app/build/dist/SvgEditor.zip
-./gradlew :app:packageExeZip
-
-# 直接运行（无需 JDK）：
-app/build/dist/SvgEditor/SvgEditor.exe
+cargo test                        # 文档模型 + 引擎单测
 ```
 
-`SvgEditor.exe` 会把内嵌的 `resvg_bridge.dll`（打包在 jar 资源里）解压到临时目录并加载，
-所以整目录拷到任何 Windows 机器都能跑。若重新编译了 `resvg_bridge`，记得重做第 1 步再打包。
+发版时由 `.github/workflows/build-app.yml` 在三个平台各打一个归档
+（`svg_easy-<OS>-<ARCH>.tar.gz` / `.zip`），挂到同一个 tag 的 Release 上。
 
 ## 模块
 
 | 模块 | 说明 |
 | --- | --- |
 | `native/resvg_bridge` | Rust cdylib，桥接 resvg/usvg，输出 PNG 字节与布局 JSON（C-ABI）。 |
+| `native/svg_easy` | 独立桌面编辑器：Rust + GPUI，进程内直接用 `resvg_bridge`，无 JVM。 |
 | `core` | Kotlin 引擎：布局模型、碰撞检测、交互状态机、JNA 桥接、Swing 面板。无 IntelliJ 依赖。 |
-| `app` | 独立运行时入口：Swing 窗口 + 源编辑器 + 拖入 `.svg` + `--smoke` 自测 + jpackage 打包。 |
 | `plugin` | IntelliJ 工具窗口与 `plugin.xml`，把原生库接入 IDE。 |
 
 详见 [DESIGN.md](DESIGN.md)。

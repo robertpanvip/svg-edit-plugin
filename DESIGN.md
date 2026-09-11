@@ -21,9 +21,9 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  IntelliJ IDEA / 独立 app                                     │
+│  IntelliJ IDEA 插件（独立桌面版见 native/svg_easy）          │
 │                                                                │
-│   SvgEditorToolWindowFactory / AppMain                         │
+│   SvgEditorToolWindowFactory                                 │
 │        │  SvgEditorPanel(asyncRendering = true) + dispose      │
 │        ▼                                                       │
 │   SvgEditorPanel (Swing)                                       │
@@ -182,9 +182,9 @@
 
 **宿主适配**：
 
-- 独立 app 与 IDEA 插件统一以 `SvgEditorPanel(renderer, asyncRendering = true)` 运行异步
-  管线；测试与 headless 校验用默认同步模式（确定性）。
-- 生命周期：app 窗口关闭 `panel.dispose()`；插件 ToolWindow 用 `Content.setDisposer`、
+- IDEA 插件以 `SvgEditorPanel(renderer, asyncRendering = true)` 运行异步管线；测试与 headless
+  校验用默认同步模式（确定性）。独立桌面版 `native/svg_easy` 不走这条 Kotlin/Swing 管线。
+- 生命周期：插件 ToolWindow 用 `Content.setDisposer`、
   `SvgPreviewPanel`（FileEditor）在 `dispose()` 释放渲染线程与计时器。
 
 ---

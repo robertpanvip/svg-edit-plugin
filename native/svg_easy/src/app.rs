@@ -471,12 +471,24 @@ impl SvgEasyApp {
     /// list is *"put this one in front of that one"* — and that question is always asked about
     /// the element already under the pointer. So the list is gone and the four moves live where
     /// the pointer is.
+    ///
+    /// The menu is attached to the canvas whether or not anything is selected, because the
+    /// right-click that opens it is also what makes the selection (`on_canvas_right_down`). Hence
+    /// the check here rather than at attach time: the builder runs a frame after that click, so it
+    /// sees the selection the click just made. Fewer than one element, or more than one, and there
+    /// is nothing a stack move could act on — an empty menu, which is never opened at all.
     pub fn restack_menu(
         &self,
         cx: &mut Context<Self>,
     ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
         let view = cx.weak_entity();
-        move |menu, _window, _cx| {
+        move |menu, _window, cx| {
+            let single = view
+                .read_with(cx, |view, _| view.editor.selection.len() == 1)
+                .unwrap_or(false);
+            if !single {
+                return menu;
+            }
             [
                 ("置顶", Stack::Front),
                 ("上移一层", Stack::Forward),

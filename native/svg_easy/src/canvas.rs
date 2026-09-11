@@ -908,20 +908,18 @@ impl SvgEasyApp {
             // Focusable so Delete / Escape / Ctrl+S land here after a click.
             .track_focus(&self.focus_handle)
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_canvas_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_canvas_right_down))
             .on_mouse_move(cx.listener(Self::on_canvas_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_canvas_up))
             .on_scroll_wheel(cx.listener(Self::on_canvas_wheel))
             .on_key_down(cx.listener(Self::on_canvas_key))
             .child(raster);
 
-        // The stack moves act on one element, so the menu is only attached when exactly one is
-        // selected: a right-click with nothing (or several things) selected gets no menu at all,
-        // rather than one whose every entry would be inert.
-        if self.editor.selection.len() == 1 {
-            canvas.context_menu(self.restack_menu(cx)).into_any_element()
-        } else {
-            canvas.into_any_element()
-        }
+        // Attached unconditionally, even with nothing selected: this is the element that receives
+        // the right-click that *makes* the selection, so it cannot be gated on the selection it is
+        // about to change. The gate lives in the builder instead, which returns an empty menu —
+        // and an empty menu is never opened.
+        canvas.context_menu(self.restack_menu(cx)).into_any_element()
     }
 
     /// Pre-renders the background/ghost pair for the drag that is starting, so the shape can
@@ -1031,6 +1029,34 @@ impl SvgEasyApp {
             }
         }
         cx.notify();
+    }
+
+    /// A right-click names the element it lands on, exactly as a left-click does.
+    ///
+    /// Without this the context menu could only ever act on a selection made earlier, which is why
+    /// right-clicking straight onto a shape appeared to do nothing. Landing on nothing leaves the
+    /// selection alone — a right-click in the margin is not a request to deselect, and the menu
+    /// that follows will simply find nothing to act on and stay shut.
+    fn on_canvas_right_down(
+        &mut self,
+        ev: &MouseDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(m) = self.mapping() else {
+            return;
+        };
+        let (x, y) = m.screen_to_doc(ev.position);
+        let tolerance = HIT_SLOP_PX / m.scale.max(1e-6) as f64;
+        let Some(node) = self.editor.hit(x, y, tolerance) else {
+            return;
+        };
+        // Collapses a multi-selection onto the shape that was clicked: the menu's four moves are
+        // only meaningful for one element, so the click has to leave exactly one.
+        if self.editor.selection.len() != 1 || self.editor.selection[0] != node {
+            self.editor.select_only(node);
+            cx.notify();
+        }
     }
 
     fn on_canvas_move(&mut self, ev: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1325,7 +1351,42 @@ mod tests {
     }
 
     #[test]
+    fn the_cursor_names_the_grip_under_the_pointer() {
+        let m = mapping();
+        let frame = Some([0.0, 0.0, 200.0, 100.0]);
+        let at = |x: f32, y: f32| cursor_for(Tool::Move, frame, &m, point(px(x), px(y)));
+
+        // Each corner pulls along its own diagonal: north-west and south-east share the `\` one,
+        // north-east and south-west the `/`.
+        assert_eq!(at(100., 50.), CursorStyle::ResizeUpLeftDownRight);
+        assert_eq!(at(300., 150.), CursorStyle::ResizeUpLeftDownRight);
+        assert_eq!(at(300., 50.), CursorStyle::ResizeUpRightDownLeft);
+        assert_eq!(at(100., 150.), CursorStyle::ResizeUpRightDownLeft);
+        // An edge grip only scales the one axis it sits on, so it gets that axis's two-way cursor.
+        assert_eq!(at(200., 50.), CursorStyle::ResizeUpDown);
+        assert_eq!(at(200., 150.), CursorStyle::ResizeUpDown);
+        assert_eq!(at(300., 100.), CursorStyle::ResizeLeftRight);
+        assert_eq!(at(100., 100.), CursorStyle::ResizeLeftRight);
+        assert_eq!(at(200., 50. - ROTATE_OFFSET), CursorStyle::PointingHand);
+        // Away from the grips nothing extra is promised.
+        assert_eq!(at(200., 100.), CursorStyle::Arrow);
+        assert_eq!(at(600., 600.), CursorStyle::Arrow);
+
+        // A band only ever draws a band, wherever it starts.
+        assert_eq!(
+            cursor_for(Tool::Marquee, frame, &m, point(px(100.), px(50.))),
+            CursorStyle::Crosshair
+        );
+        // With nothing selected there are no grips to be over.
+        assert_eq!(
+            cursor_for(Tool::Move, None, &m, point(px(100.), px(50.))),
+            CursorStyle::Arrow
+        );
+    }
+
+    #[test]
     fn a_corner_grip_scales_both_axes_from_its_opposite_corner() {
+        let frame = [10.0, 20.0, 100.0, 50.0];
         // The south-east grip sits at (110, 70) with the north-west corner held at (10, 20).
         assert_eq!(scale_factors(Grip::Se, frame, (110.0, 70.0)), (1.0, 1.0));
         assert_eq!(scale_factors(Grip::Se, frame, (210.0, 120.0)), (2.0, 2.0));
