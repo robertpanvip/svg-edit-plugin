@@ -15,6 +15,8 @@ import java.awt.RenderingHints
 import java.awt.TexturePaint
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
+import java.awt.event.FocusAdapter
+import java.awt.event.FocusEvent
 import java.awt.event.KeyAdapter
 import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
@@ -214,6 +216,17 @@ class SvgEditorPanel(
     /** True while a multi-element selection is being dragged as one group in MOVE tool. */
     private var groupDrag = false
 
+    /**
+     * Deferred arrow-key nudge: the primary element it was applied to and the accumulated delta
+     * (canvas units). Arrow keys move ONLY the top-most selected layer through a cheap composite
+     * preview — the committed source stays untouched until [commitPendingNudge] lands (when the
+     * panel loses focus, or the selection/gesture changes), so holding an arrow key never triggers
+     * a full copy of the document per keypress.
+     */
+    private var nudgePrimary: String? = null
+    private var nudgeDx = 0.0
+    private var nudgeDy = 0.0
+
     /** Transparency chessboard (IDEA-style) drawn behind the image. On by default. */
     private var chessboardEnabled = true
 
@@ -303,6 +316,20 @@ class SvgEditorPanel(
         }
 
     private val scrollPane = JScrollPane(canvas)
+
+    /**
+     * Lands a pending arrow-key nudge when the drawing panel loses focus — the explicit "save"
+     * boundary for keyboard moves (see [nudgeSelection] / [commitPendingNudge]). Attached to both
+     * this panel and the canvas so it fires regardless of which one holds the focus owner.
+     */
+    private val nudgeFocusListener =
+        object : FocusAdapter() {
+            override fun focusLost(e: FocusEvent) {
+                // Focus loss is the one place an arrow-key nudge both commits AND echoes to the
+                // editor — the user's "save when I leave the drawing panel" boundary.
+                commitPendingNudge(echo = true)
+            }
+        }
 
     /**
      * Application-wide key gate for the editing keys.
@@ -401,6 +428,8 @@ class SvgEditorPanel(
         add(scrollPane, BorderLayout.CENTER)
         installMouse()
         installKeys()
+        addFocusListener(nudgeFocusListener)
+        canvas.addFocusListener(nudgeFocusListener)
         KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(keyDispatcher)
     }
 
@@ -476,6 +505,7 @@ class SvgEditorPanel(
     /** Delete all selected elements from the document. */
     fun deleteSelected() {
         if (selectedIds.isEmpty()) return
+        commitPendingNudge()
         val sc = sidecar
         val viaSidecar = sc != null && sidecarActive
         var changed = false
@@ -566,34 +596,86 @@ class SvgEditorPanel(
 
     /** Nudge the selection by `(dx, dy)` canvas units (arrow keys). */
     fun nudgeSelection(dx: Double, dy: Double) {
-        if (selectedIds.isEmpty()) return
         if (dx == 0.0 && dy == 0.0) return
-        // Route through the same commit path as a drag so the move reaches the source that is
-        // actually rendered. In sidecar mode the canvas paints the sidecar's own document tree,
-        // not the panel's local engine copy, so a local-only engine.moveElement would leave the
-        // element visually stuck while every other mechanism (drag) commits through the sidecar.
-        val sc = sidecar
-        val viaSidecar = sc != null && sidecarActive
-        var changed = false
-        // Each commit refreshes the source + layout, so resolve every element fresh inside the
-        // loop (mirrors what the group-move drag path does).
-        for (id in selectedIds.toList()) {
-            val el = engine.layout.byId(id) ?: continue
-            val moved =
-                if (viaSidecar && el.nodeId != 0L) {
-                    commitSidecar(InteractionController.EditResult.Move(el, dx, dy)) == true
-                } else {
-                    engine.moveElement(id, dx, dy)
-                }
-            if (moved) changed = true
+        // Arrow keys move ONLY the top-most selected layer (the primary), exactly like a drag's
+        // preview. The committed source is untouched until [commitPendingNudge] — holding an arrow
+        // key just shifts the already-rendered ghost, never a full document round-trip per press.
+        val primary = selectedId ?: return
+        nudgePrimary = primary
+        nudgeDx += dx
+        nudgeDy += dy
+        // Ensure the single-element preview layers for the primary are ready; the composite then
+        // blits the pre-rendered ghost at the shifted box (see the renderCanvas layered branch).
+        if (layerId != primary || !layersCurrent()) {
+            clearLayers()
+            requestLayers(primary)
         }
-        if (changed) onEdit?.invoke()
-        if (changed) refreshAfterEdit(selectedId ?: selectedIds.last())
+        val el = engine.layout.byId(primary) ?: return
+        interaction.previewBox =
+            InteractionController.Box(el.x + nudgeDx, el.y + nudgeDy, el.width, el.height)
+        interaction.previewAngle = 0.0
+        canvas.repaint()
         emitStatus()
+    }
+
+    /**
+     * Land a pending arrow-key nudge: commit the accumulated move ONCE (through the same sidecar
+     * path as a drag so it reaches the source actually rendered) and re-render the frame. When
+     * [echo] is set the move is also echoed to the host editor — reserved for the panel losing
+     * focus (the "save" boundary), so selection changes / new gestures settle the source without
+     * churning the text editor. A no-op when nothing is pending.
+     */
+    private fun commitPendingNudge(echo: Boolean = false) {
+        val wasNudging = nudgePrimary != null
+        val primary = nudgePrimary
+        val dx = nudgeDx
+        val dy = nudgeDy
+        // When a nudge preview is/was in effect, drop it so the composite returns to the
+        // committed frame. Never touch `previewBox` for a live drag — handleRelease re-reads it
+        // to fold the release point into the drag's final commit, and clearing it there would
+        // silently discard that (making the element snap back).
+        nudgePrimary = null
+        nudgeDx = 0.0
+        nudgeDy = 0.0
+        if (wasNudging) {
+            interaction.previewBox = null
+            interaction.previewAngle = 0.0
+        }
+        if (primary == null || (dx == 0.0 && dy == 0.0)) return
+        val el = engine.layout.byId(primary) ?: return
+        val sc = sidecar
+        val viaSidecar = sc != null && sidecarActive && el.nodeId != 0L
+        val committed =
+            if (viaSidecar) {
+                commitSidecar(InteractionController.EditResult.Move(el, dx, dy))
+                    ?: engine.moveElement(primary, dx, dy)
+            } else {
+                engine.moveElement(primary, dx, dy)
+            }
+        if (committed) {
+            // A local-only edit re-renders the frame once; a sidecar commit already produced one.
+            if (!viaSidecar) {
+                offscreen = renderNow()
+                offscreenSvg = engine.svgSource
+                vpImage = null
+                vpSvg = null
+                vpPreview = null
+                staticDirty = true
+            }
+            clearLayers()
+            requestLayers(primary)
+            canvas.repaint()
+            emitStatus()
+            if (echo) onEdit?.invoke() // echo the settled position to the editor (one write, on focus loss)
+        } else {
+            clearLayers()
+            canvas.repaint()
+        }
     }
 
     /** Move the selected elements onto the given alignment edge/axis of the selection bounds. */
     fun alignSelection(a: Align) {
+        commitPendingNudge()
         val els = selectedIds.mapNotNull { engine.layout.byId(it) }
         if (els.size < 2) return
         val minX = els.minOf { it.x }
@@ -663,6 +745,7 @@ class SvgEditorPanel(
     /** Reorder the selected elements in the layer stack (source document order). */
     fun reorderSelection(r: Reorder) {
         if (selectedIds.isEmpty()) return
+        commitPendingNudge()
         val dir =
             when (r) {
                 Reorder.FRONT -> SvgUtils.ReorderDir.FRONT
@@ -693,6 +776,9 @@ class SvgEditorPanel(
         ids: Collection<String>,
         primary: String,
     ): String? {
+        // A nudged-but-uncommitted element must settle before the selection moves on, or the
+        // pending preview offset would be drawn against the new primary's ghost.
+        commitPendingNudge()
         selectedIds.clear()
         for (id in ids.distinct()) {
             if (engine.layout.byId(id) == null) continue // drop stale/unknown ids
@@ -726,6 +812,7 @@ class SvgEditorPanel(
 
     /** Clear the selection entirely. */
     private fun clearSelection() {
+        commitPendingNudge()
         selectedIds.clear()
         selectedId = null
         groupDrag = false
@@ -826,6 +913,8 @@ class SvgEditorPanel(
     fun dispose() {
         crispTimer?.stop()
         preheatTimer?.stop()
+        removeFocusListener(nudgeFocusListener)
+        canvas.removeFocusListener(nudgeFocusListener)
         KeyboardFocusManager.getCurrentKeyboardFocusManager().removeKeyEventDispatcher(keyDispatcher)
         scheduler?.dispose()
         // The sidecar process is owned by the host (plugin), not by this panel.
@@ -2008,6 +2097,10 @@ class SvgEditorPanel(
         x: Int,
         y: Int,
     ) {
+        // A pending arrow-key nudge must settle before a new gesture starts: the drag it may
+        // initiate would otherwise build its ghost / commit from a pre-nudge sidecar tree, and a
+        // stray preview box must not leak into the fresh gesture.
+        commitPendingNudge()
         // A new gesture starts from a clean slate: the previous drag's dirty region must not be
         // unioned into this one's.
         dragDirty = null
@@ -2520,6 +2613,10 @@ class SvgEditorPanel(
      * here mean the picture on screen belongs to the current document.
      */
     fun debugContentSvg(): String? = vpSvg ?: offscreenSvg
+
+    /** Test hook: land a pending arrow-key nudge (same as the focus-loss save), so tests can assert the
+     *  deferred commit deterministically without simulating a focus event. */
+    fun debugFlushNudge() = commitPendingNudge(echo = true)
 
     /** Test hook: replace the selection with `ids` (last member becomes primary). */
     fun debugSetSelection(ids: List<String>) {

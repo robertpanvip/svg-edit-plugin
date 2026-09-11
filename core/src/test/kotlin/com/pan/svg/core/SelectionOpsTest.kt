@@ -103,6 +103,9 @@ class SelectionOpsTest {
         // The step is 1% of the 200px-wide viewport converted to SVG units at the current view scale.
         val step = 200 * 0.01 / panel.debugViewScale()
         pressKey(panel, KeyEvent.VK_RIGHT)
+        // Arrow keys preview the move; the source is committed when the panel settles the nudge
+        // (focus loss / selection change). Settle it deterministically, then check the source.
+        panel.debugFlushNudge()
         val t = translateOf(panel.svgSource, "dot")
         assertTrue(
             t != null && kotlin.math.abs(t.first - step) < 1e-3 && t.second == 0.0,

@@ -28,17 +28,39 @@ class SidecarPanelTest {
     }
 
     @Test
-    fun `a move the sidecar cannot address still refreshes the content frame`() {
+    fun `arrow nudge defers the commit until the panel settles it`() {
+        FakeSidecar().use { fake ->
+            val panel = SvgEditorPanel(FakeSvgRenderer(), sidecar = fake)
+            panel.loadSvg(Samples.SIMPLE)
+            panel.debugSetSelection(listOf("dot")) // nodeId 3
+            panel.nudgeSelection(10.0, 0.0)
+            // Arrow keys preview only (like a drag's ghost) — the expensive sidecar commit is
+            // deferred until the panel settles the nudge (focus loss / selection change), so
+            // holding an arrow key never triggers a full document round-trip per keypress.
+            assertEquals(0, fake.count("commit"))
+            panel.debugFlushNudge()
+            assertEquals(1, fake.count("commit"))
+            val params = fake.paramsOf("commit")
+            assertEquals(3L, (params["nodeId"] as Number).toLong())
+            assertEquals(listOf(1.0, 0.0, 0.0, 1.0, 10.0, 0.0), params["matrix"])
+            assertEquals(fake.commitSvg, panel.svgSource)
+            panel.dispose()
+        }
+    }
+
+    @Test
+    fun `a nudge the sidecar cannot address still settles into a fresh content frame`() {
         NodeIdlessSidecar().use { fake ->
             val panel = SvgEditorPanel(FakeSvgRenderer(), sidecar = fake)
             panel.loadSvg(Samples.SIMPLE)
             panel.debugSetSelection(listOf("box-a"))
             panel.nudgeSelection(10.0, 0.0)
-            // No node id → nothing to commit through the sidecar; the move lands locally…
+            // No node id → nothing to commit through the sidecar while nudging…
             assertEquals(0, fake.count("commit"))
+            // …and when the nudge settles, the move lands locally and the content frame follows,
+            // so the canvas never keeps painting the pre-edit raster ("it moved, then went back").
+            panel.debugFlushNudge()
             assertTrue(panel.svgSource.contains("translate(10"), "the move must reach the source")
-            // …and the canvas must then depict THAT source. Leaving the pre-edit raster cached
-            // would paint the object back at its old position after the drag.
             assertEquals(panel.svgSource, panel.debugContentSvg())
             panel.dispose()
         }
@@ -91,7 +113,8 @@ class SidecarPanelTest {
             panel.loadSvg(Samples.SIMPLE)
             panel.debugSetSelection(listOf("dot")) // nodeId 3
             panel.nudgeSelection(10.0, 0.0)
-            // The commit must reach the sidecar (whose tree is what actually renders), not just
+            panel.debugFlushNudge()
+            // The settle must reach the sidecar (whose tree is what actually renders), not just
             // touch the local engine copy — otherwise the element stays visually put.
             assertEquals(1, fake.count("commit"))
             val params = fake.paramsOf("commit")
