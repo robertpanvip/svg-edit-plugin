@@ -1,0 +1,29 @@
+[package]
+name = "gpui_spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Spike: validate that the standalone SvgEasy app can be rebuilt on GPUI + gpui-component with
+# no JVM/Kotlin. Reuses the existing Rust engine (`resvg_bridge`: dom/geom/session) in-process —
+# no sidecar, no JSON-RPC.
+#
+# Version pairing is deliberate and pinned. GPUI is published as a set of snapshot crates and they
+# must move together:
+#   gpui-pre          -> lib `gpui`              (framework)
+#   gpui-pre-platform -> lib `gpui_platform`     (windowing/text backends + `application()`)
+#   gpui-component    -> widgets + code editor, built against `gpui-pre` ^0.3.1
+# All are pre-1.0 and drift between releases, so bump them as a set.
+[dependencies]
+gpui-pre = "0.3.4"
+# Cross-platform default per the upstream README: font-kit on macOS, wayland+x11 on Linux.
+gpui-pre-platform = { version = "0.3.4", features = ["font-kit", "wayland", "x11"] }
+# The `tree-sitter` feature turns on the editor's highlighting machinery. gpui-component bundles
+# no XML grammar, so `tree-sitter-xml` below is registered by hand at startup (SVG is XML).
+gpui-component = { version = "0.6.1", features = ["tree-sitter"] }
+resvg_bridge = { path = "../resvg_bridge" }
+# Must match the `image` version gpui-pre uses: RenderImage is built from `image::Frame` values.
+image = "0.25"
+# Supplies the XML grammar + highlight queries that gpui-component lacks. Exposes its grammar as a
+# `tree-sitter-language` `LanguageFn`, so it links against gpui-component's own tree-sitter version.
+tree-sitter-xml = "0.7"
