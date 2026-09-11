@@ -1640,7 +1640,7 @@ class SvgEditorPanel(
                         panLast = null
                         updateCursor()
                     } else if (SwingUtilities.isLeftMouseButton(e)) {
-                        handleRelease()
+                        handleRelease(e.x, e.y)
                     }
                 }
 
@@ -2236,10 +2236,21 @@ class SvgEditorPanel(
         return allCommitted
     }
 
-    private fun handleRelease() {
+    private fun handleRelease(x: Int, y: Int) {
         if (marqueeOrigin != null || marqueeRect != null) {
             finishMarquee()
             return
+        }
+        // Sync the controller's preview to the exact release point before committing. Swing
+        // coalesces mouseDragged events, so the preview box often sits a few px behind the
+        // pointer that was actually released; committing that stale box made the object visibly
+        // "jump back" the instant the button came up. A final onDragMove folds the release
+        // position (through the same snap hysteresis) into previewBox so what you see — the last
+        // preview — is exactly what you get. A pure click (no motion) leaves previewBox null and
+        // is skipped so click-to-select keeps behaving like a plain selection.
+        val (ix, iy) = toImage(x, y)
+        if (interaction.state == InteractionController.State.DRAG && interaction.previewBox != null) {
+            interaction.onDragMove(engine.layout, ix, iy)
         }
         val res = interaction.onMouseReleased()
         var committed = false
@@ -2380,7 +2391,7 @@ class SvgEditorPanel(
     ) {
         handlePress(p1.x, p1.y)
         handleDrag(p2.x, p2.y)
-        handleRelease()
+        handleRelease(p2.x, p2.y)
     }
 
     /** Test hook: panel-pixel center of an element (uses the same view math as rendering). */
@@ -2404,7 +2415,19 @@ class SvgEditorPanel(
     }
 
     /** Test hook: finish a press-drag started with [debugPressDrag]. */
-    fun debugRelease() = handleRelease()
+    fun debugRelease() =
+        handleRelease(
+            kotlin.math.round(interaction.pointerX * viewScale + offsetX).toInt(),
+            kotlin.math.round(interaction.pointerY * viewScale + offsetY).toInt(),
+        )
+
+    /** Test hook: release at an explicit panel point (even one beyond the last drag frame). */
+    fun debugReleaseAt(x: Int, y: Int) = handleRelease(x, y)
+
+    /** Test hook: disable edge snapping so tests can assert a pure delta. */
+    fun debugSetSnapEnabled(enabled: Boolean) {
+        interaction.snapEnabled = enabled
+    }
 
     /** Test hook: force a DPI scale (simulates a HiDPI display in headless tests). */
     fun debugSetDpi(d: Double) {

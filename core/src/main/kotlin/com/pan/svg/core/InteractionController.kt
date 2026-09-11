@@ -90,6 +90,8 @@ class InteractionController {
 
     private val handles: List<Handle> = Handle.entries.toList()
     private val snapThreshold = 4.0 // svg units
+    /** Disables edge snapping entirely (used by tests that want a pure, snap-free drag). */
+    var snapEnabled: Boolean = true
     /** Engaged snap targets (absolute svg-unit positions) for hysteresis between frames. */
     private var snapXTarget: Double? = null
     private var snapYTarget: Double? = null
@@ -446,6 +448,11 @@ class InteractionController {
         mode: EditMode,
         handle: Handle?,
     ): Pair<Box, List<SnapLine>> {
+        if (!snapEnabled || layout.elements.isEmpty()) {
+            snapXTarget = null
+            snapYTarget = null
+            return box to emptyList()
+        }
         val others = layout.elements.filter { it.id != el.id && it.id.isNotBlank() }
         if (others.isEmpty()) {
             snapXTarget = null

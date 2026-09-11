@@ -46,6 +46,24 @@ class SidecarPanelTest {
     }
 
     @Test
+    fun `release lands at the release point even when it lags the last drag frame`() {
+        FakeSidecar().use { fake ->
+            val panel = SvgEditorPanel(FakeSvgRenderer(), sidecar = fake)
+            panel.loadSvg(Samples.SIMPLE)
+            fake.hitNodeId = 3L
+            panel.debugSetSnapEnabled(false) // isolate the frame-sync check from edge snapping
+            panel.debugDoubleClick(50, 40)
+            // can drop the final frame, so the last preview sits behind the released pointer. The
+            // commit must use the actual release position, not the stale drag frame.
+            panel.debugPressDrag(50, 40, 90, 80)
+            panel.debugReleaseAt(95, 84)
+            val params = fake.paramsOf("commit")
+            assertEquals(listOf(1.0, 0.0, 0.0, 1.0, 45.0, 44.0), params["matrix"])
+            panel.dispose()
+        }
+    }
+
+    @Test
     fun `identity drags skip the commit round trip`() {
         FakeSidecar().use { fake ->
             val panel = SvgEditorPanel(FakeSvgRenderer(), sidecar = fake)
