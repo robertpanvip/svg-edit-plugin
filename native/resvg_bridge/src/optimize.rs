@@ -1,22 +1,35 @@
-//! SVG optimisation — the SVGO engine, in-process.
+//! SVG optimisation — the SVGO engine, running as JavaScript.
 //!
-//! Both front ends offer a *SVGO* button and a *SVGO settings* dialog. The engine behind them is
-//! [`oxvg`](https://crates.io/crates/oxvg), a Rust implementation of SVGO that runs the same
-//! plugin pipeline (35 jobs in its `preset-default` equivalent). Building it into this crate is
-//! what lets the standalone app spend no Node process on the job, and lets the IntelliJ plugin
-//! reach the same engine through the sidecar it already talks to — one optimiser, no second
-//! runtime.
+//! Both front ends offer a *SVGO* button and a *SVGO settings* dialog, and the engine behind them
+//! is the real thing: SVGO 3, bundled to a single JavaScript file
+//! (`assets/svgo.browser.js`, built from `native/svgo_bundle/entry.js`) and executed by a QuickJS
+//! interpreter embedded through [`rquickjs`]. QuickJS is compiled from its vendored C sources, so
+//! the standalone app spends no Node process on the job and the plugin reaches the same engine
+//! through the sidecar it already talks to — one optimiser, no second runtime, on all three
+//! shipped platforms.
 //!
-//! Configuration is by *job name*, not by struct field: [`passes`] is the catalogue the dialogs
-//! render, and [`OptimizeOptions`] carries the user's on/off choices as the SVGO plugin names.
-//! The names travel over the sidecar as JSON, so the Kotlin side never needs the Rust field
-//! layout — only [`exec`] has to know how a name maps onto a [`Jobs`] field.
+//! The engine used to be [`oxvg`](https://crates.io/crates/oxvg), a Rust re-implementation of
+//! SVGO. It worked, but it was an entire second implementation of the same pipeline: ~10.7 MB of
+//! linked code (3.9 MB deflated) versus 2.1 MB (0.9 MB deflated) for QuickJS plus the bundle, and
+//! the plugin ships that once per OS. The trade is interpreter speed — measured 16–19x slower
+//! than the Rust engine on the same documents, which lands a 3 KB icon at ~14 ms and a 180 KB
+//! drawing at ~0.8 s. Optimising is an explicit button press in both front ends rather than
+//! something that happens while drawing, so the size win was taken.
+//!
+//! Configuration is by *plugin name*, not by struct field: [`PASSES`] is the catalogue the
+//! dialogs render, and [`OptimizeOptions`] carries the user's on/off choices as SVGO plugin
+//! names. The names travel over the sidecar as JSON, so the Kotlin side never needs to know how
+//! the engine is implemented — `entry.js` is the only place that translates a name into SVGO
+//! configuration.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use oxvg_ast::{parse::roxmltree::parse, serialize::Node as _, visitor::Info};
-use oxvg_optimiser::Jobs;
+use rquickjs::{Context, Ctx, Function, Runtime};
 use serde::{Deserialize, Serialize};
+
+/// SVGO, bundled by esbuild. See `native/svgo_bundle/entry.js`.
+const SVGO_BUNDLE: &str = include_str!("../assets/svgo.browser.js");
 
 /// One configurable optimisation, as the settings dialogs present it.
 ///
@@ -31,9 +44,14 @@ pub struct OptimizePass {
 
 /// The catalogue, in the order the dialogs list it.
 ///
-/// Every entry is a job that `Jobs::default()` — oxvg's `preset-default` — has switched on, which
-/// is what makes "tick it back on" possible: the base is the full preset and a choice can only
-/// turn jobs *off*. `catalog_covers_the_default_preset` keeps that true.
+/// Every entry is a plugin of SVGO's `preset-default`, which is what makes "tick it back on"
+/// possible: the base is the full preset and a choice can only turn plugins *off*. Both halves of
+/// that are guarded by tests — `every_catalogue_name_is_a_real_svgo_plugin` catches a name SVGO
+/// no longer ships, and `every_catalogue_entry_is_part_of_the_default_preset` catches one that is
+/// not in the preset, which SVGO only warns about and which would leave a checkbox doing nothing.
+///
+/// SVGO 2's standalone `applyTransforms` plugin is deliberately absent: SVGO 3 folded it into
+/// `convertPathData` as a parameter, so there is no separate pass left to configure.
 pub const PASSES: &[OptimizePass] = &[
     OptimizePass { name: "removeDoctype", label: "Remove doctype", group: "Document" },
     OptimizePass { name: "removeXMLProcInst", label: "Remove XML declaration", group: "Document" },
@@ -55,7 +73,6 @@ pub const PASSES: &[OptimizePass] = &[
     OptimizePass { name: "cleanupEnableBackground", label: "Clean up enable-background", group: "Attributes" },
     OptimizePass { name: "convertColors", label: "Shorten colours", group: "Attributes" },
     OptimizePass { name: "convertTransform", label: "Shorten transforms", group: "Attributes" },
-    OptimizePass { name: "removeDeprecatedAttrs", label: "Remove deprecated attributes", group: "Attributes" },
     OptimizePass { name: "removeUnknownsAndDefaults", label: "Remove defaults and unknowns", group: "Attributes" },
     OptimizePass { name: "removeNonInheritableGroupAttrs", label: "Remove non-inheritable group attributes", group: "Attributes" },
     OptimizePass { name: "removeUselessStrokeAndFill", label: "Remove useless stroke and fill", group: "Attributes" },
@@ -67,15 +84,28 @@ pub const PASSES: &[OptimizePass] = &[
     OptimizePass { name: "convertEllipseToCircle", label: "Convert ellipse to circle", group: "Shapes" },
     OptimizePass { name: "convertPathData", label: "Shorten path data", group: "Shapes" },
     OptimizePass { name: "mergePaths", label: "Merge paths", group: "Shapes" },
-    OptimizePass { name: "applyTransforms", label: "Apply transforms", group: "Shapes" },
     OptimizePass { name: "moveElemsAttrsToGroup", label: "Move element attributes to group", group: "Shapes" },
     OptimizePass { name: "moveGroupAttrsToElems", label: "Move group attributes to elements", group: "Shapes" },
 ];
 
+/// Plugins `preset-default` has switched on that must stay off here.
+///
+/// Both are on in the stock preset, and both are wrong for a drawing editor:
+///
+/// * `removeViewBox` deletes the `viewBox`, which is what makes the document scale — the editors
+///   re-render through it on every resize, so losing it turns a responsive drawing into a fixed
+///   one.
+/// * `removeTitle` deletes `<title>`, the accessible name a screen reader announces.
+///
+/// Forced off rather than offered as checkboxes: they are not optimisations the user would want
+/// to trade away, and forcing them needs no per-entry default, so the dialogs keep their simple
+/// "everything is on" model.
+const NEVER: &[&str] = &["removeViewBox", "removeTitle"];
+
 /// What the user ticked in the settings dialog.
 ///
 /// A name missing from `passes` means *on* — the catalogue's defaults are all on, so an empty map
-/// is the stock SVGO preset and a map only ever records the exceptions. Unknown names are ignored
+/// is the stock preset and a map only ever records the exceptions. Unknown names are ignored
 /// rather than rejected, so a settings file written by a newer build still loads.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -122,40 +152,62 @@ impl OptimizeResult {
     }
 }
 
+thread_local! {
+    /// The interpreter, built on first use and kept for the life of the thread.
+    ///
+    /// Evaluating the bundle costs ~80 ms — more than most documents take to optimise — so it
+    /// must not be paid per call, and the settings dialog optimises again on every "OK". Both
+    /// callers are single-threaded (the sidecar's request loop and the app's UI thread), so one
+    /// engine per thread is enough. A [`Context`] holds its own clone of the [`Runtime`], so
+    /// storing it alone keeps both alive.
+    static ENGINE: RefCell<Option<Context>> = const { RefCell::new(None) };
+}
+
+/// Runs `f` against the thread's engine, creating it if this is the first call.
+fn with_engine<T>(f: impl FnOnce(&Context) -> Result<T, String>) -> Result<T, String> {
+    ENGINE.with(|slot| {
+        if slot.borrow().is_none() {
+            let runtime = Runtime::new().map_err(|e| format!("QuickJS runtime: {e}"))?;
+            let context = Context::full(&runtime).map_err(|e| format!("QuickJS context: {e}"))?;
+            context
+                .with(|ctx| ctx.eval::<(), _>(SVGO_BUNDLE))
+                .map_err(|e| format!("SVGO bundle: {e}"))?;
+            *slot.borrow_mut() = Some(context);
+        }
+        let slot = slot.borrow();
+        f(slot.as_ref().expect("the engine was just created"))
+    })
+}
+
 /// Runs the enabled passes over `svg` and serialises the result.
 ///
-/// A parse failure is reported rather than swallowed: the callers show it in a dialog, so the
-/// user learns their document is malformed instead of seeing the optimiser "do nothing".
+/// An error is reported rather than swallowed: the callers show it in a dialog, so the user
+/// learns the document could not be optimised instead of seeing the optimiser "do nothing".
 pub fn optimize(svg: &str, options: &OptimizeOptions) -> Result<OptimizeResult, String> {
     let before_bytes = svg.len();
 
-    let mut jobs = Jobs::default();
+    // Only the exceptions travel. `NEVER` is applied on top of the user's choices, so the two
+    // plugins that break the editors can never be switched back on by a settings file.
+    let mut overrides = serde_json::Map::new();
+    for name in NEVER {
+        overrides.insert((*name).to_string(), serde_json::Value::Bool(false));
+    }
     for pass in PASSES {
         if !options.enabled(pass.name) {
-            disable(&mut jobs, pass.name);
+            overrides.insert(pass.name.to_string(), serde_json::Value::Bool(false));
         }
     }
+    let overrides = serde_json::Value::Object(overrides).to_string();
 
-    // The pipeline runs inside `parse`'s callback, which has no way to fail, so a job error is
-    // parked here and returned once the document has been handed back.
-    let mut failure: Option<String> = None;
-    let out = parse(svg, |dom, allocator| {
-        if let Err(e) = jobs.run(dom, &Info::new(allocator)) {
-            failure = Some(e.to_string());
-        }
-        match dom.serialize() {
-            Ok(svg) => svg,
-            Err(e) => {
-                failure = Some(e.to_string());
-                String::new()
-            }
-        }
-    })
-    .map_err(|e| e.to_string())?;
-
-    if let Some(e) = failure {
-        return Err(e);
-    }
+    let out = with_engine(|context| {
+        context.with(|ctx| {
+            let call = || -> rquickjs::Result<String> {
+                let optimize: Function = ctx.globals().get("__svgoOptimize")?;
+                optimize.call((svg, overrides.as_str()))
+            };
+            call().map_err(|e| js_error(&ctx, e))
+        })
+    })?;
 
     Ok(OptimizeResult {
         after_bytes: out.len(),
@@ -165,48 +217,23 @@ pub fn optimize(svg: &str, options: &OptimizeOptions) -> Result<OptimizeResult, 
     })
 }
 
-/// Switches one job off. Field assignment rather than a config round-trip: [`Jobs`] is a plain
-/// struct of `Option<Job>`, and `None` is what "not in the pipeline" means.
-fn disable(jobs: &mut Jobs, name: &str) {
-    match name {
-        "removeDoctype" => jobs.remove_doctype = None,
-        "removeXMLProcInst" => jobs.remove_x_m_l_proc_inst = None,
-        "removeComments" => jobs.remove_comments = None,
-        "removeMetadata" => jobs.remove_metadata = None,
-        "removeEditorsNSData" => jobs.remove_editors_n_s_data = None,
-        "removeDesc" => jobs.remove_desc = None,
-        "cleanupIds" => jobs.cleanup_ids = None,
-        "removeUselessDefs" => jobs.remove_useless_defs = None,
-        "removeUnusedNS" => jobs.remove_unused_n_s = None,
-        "removeEmptyAttrs" => jobs.remove_empty_attrs = None,
-        "removeEmptyContainers" => jobs.remove_empty_containers = None,
-        "removeEmptyText" => jobs.remove_empty_text = None,
-        "removeHiddenElems" => jobs.remove_hidden_elems = None,
-        "collapseGroups" => jobs.collapse_groups = None,
-        "sortDefsChildren" => jobs.sort_defs_children = None,
-        "cleanupAttrs" => jobs.cleanup_attrs = None,
-        "cleanupNumericValues" => jobs.cleanup_numeric_values = None,
-        "cleanupEnableBackground" => jobs.cleanup_enable_background = None,
-        "convertColors" => jobs.convert_colors = None,
-        "convertTransform" => jobs.convert_transform = None,
-        "removeDeprecatedAttrs" => jobs.remove_deprecated_attrs = None,
-        "removeUnknownsAndDefaults" => jobs.remove_unknowns_and_defaults = None,
-        "removeNonInheritableGroupAttrs" => jobs.remove_non_inheritable_group_attrs = None,
-        "removeUselessStrokeAndFill" => jobs.remove_useless_stroke_and_fill = None,
-        "sortAttrs" => jobs.sort_attrs = None,
-        "inlineStyles" => jobs.inline_styles = None,
-        "minifyStyles" => jobs.minify_styles = None,
-        "mergeStyles" => jobs.merge_styles = None,
-        "convertShapeToPath" => jobs.convert_shape_to_path = None,
-        "convertEllipseToCircle" => jobs.convert_ellipse_to_circle = None,
-        "convertPathData" => jobs.convert_path_data = None,
-        "mergePaths" => jobs.merge_paths = None,
-        "applyTransforms" => jobs.apply_transforms = None,
-        "moveElemsAttrsToGroup" => jobs.move_elems_attrs_to_group = None,
-        "moveGroupAttrsToElems" => jobs.move_group_attrs_to_elems = None,
-        // Unknown name: nothing to switch off. `OptimizeOptions` stays forward-compatible.
-        _ => {}
+/// Turns a JavaScript failure into the message the dialogs show.
+///
+/// A thrown exception carries the useful text — SVGO's parser reports
+/// `"<input>:1:5: Unexpected close tag"` — and `catch` is what hands it back; the remaining
+/// errors (allocation, a missing global) describe themselves.
+fn js_error(ctx: &Ctx, error: rquickjs::Error) -> String {
+    if matches!(error, rquickjs::Error::Exception) {
+        let thrown = ctx.catch();
+        if let Some(message) = thrown
+            .as_exception()
+            .and_then(|exception| exception.message())
+        {
+            return message;
+        }
+        return "SVGO threw a non-Error value".to_string();
     }
+    error.to_string()
 }
 
 #[cfg(test)]
@@ -216,10 +243,29 @@ mod tests {
     const SAMPLE: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
 <!-- a comment -->
 <svg xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="0 0 200 120">
+  <title>a title</title>
   <metadata>generated</metadata>
   <rect id="box-a" x="10.000" y="10" width="80" height="60" fill="#4caf50"/>
   <circle id="dot" cx="150" cy="60" r="30" fill="#e91e63"/>
 </svg>"##;
+
+    /// Calls one of the bundle's zero-argument probe globals. Tests only — the shipped build has
+    /// no caller for `__svgoPluginNames` or `__svgoTakeWarnings`.
+    fn probe<T>(name: &'static str) -> T
+    where
+        T: for<'js> rquickjs::FromJs<'js>,
+    {
+        with_engine(|context| {
+            context.with(|ctx| {
+                let call = || -> rquickjs::Result<T> {
+                    let f: Function = ctx.globals().get(name)?;
+                    f.call(())
+                };
+                call().map_err(|e| js_error(&ctx, e))
+            })
+        })
+        .unwrap_or_else(|e| panic!("{name} failed: {e}"))
+    }
 
     #[test]
     fn the_default_options_shrink_a_document() {
@@ -273,53 +319,26 @@ mod tests {
         assert_eq!(tree.size().height().round(), 120.0);
     }
 
+    /// `removeViewBox` and `removeTitle` are on in SVGO's preset and would both be destructive
+    /// here, so [`NEVER`] has to win over the preset even though neither is a catalogue entry (a
+    /// user therefore cannot switch them on, either).
     #[test]
-    fn malformed_input_reports_an_error() {
-        assert!(optimize("<svg><unclosed>", &OptimizeOptions::default()).is_err());
+    fn the_viewbox_and_the_title_are_never_removed() {
+        let result = optimize(SAMPLE, &OptimizeOptions::default()).expect("optimise");
+        assert!(result.svg.contains("viewBox"), "{}", result.svg);
+        assert!(result.svg.contains("<title>"), "{}", result.svg);
     }
 
-    /// Guards the invariant the settings dialog rests on: anything the catalogue offers can be
-    /// ticked back on, which is only true while the base preset still has it switched on. Also
-    /// proves each name reaches a real, distinct field — a typo or a copy-paste in [`disable`]
-    /// would otherwise leave some job running no matter what the user chose.
-    ///
-    /// Observed through the serialised job set rather than by name: `Jobs` skips its `None` fields,
-    /// so switching a job off removes exactly one key.
+    /// SVGO's parser tolerates a document that merely stops mid-element (it reports "Unexpected
+    /// end" and SVGO deliberately ignores that one), but a genuinely broken document has to come
+    /// back as an error rather than as a half-parsed file the editor would then load.
     #[test]
-    fn catalog_covers_the_default_preset() {
-        let names = |jobs: &Jobs| -> std::collections::BTreeSet<String> {
-            serde_json::to_value(jobs)
-                .expect("serialize")
-                .as_object()
-                .expect("jobs is a struct")
-                .keys()
-                .cloned()
-                .collect()
+    fn mismatched_tags_report_an_error() {
+        let error = match optimize("<svg><rect></svg>", &OptimizeOptions::default()) {
+            Ok(result) => panic!("expected an error, got {}", result.svg),
+            Err(error) => error,
         };
-
-        let base = names(&Jobs::default());
-        let mut switched: Vec<String> = Vec::new();
-        for pass in PASSES {
-            let mut jobs = Jobs::default();
-            disable(&mut jobs, pass.name);
-            let after = names(&jobs);
-
-            let gone: Vec<&String> = base.difference(&after).collect();
-            assert_eq!(
-                gone.len(),
-                1,
-                "disabling {} should switch off exactly one job, off went {gone:?}",
-                pass.name
-            );
-            switched.push(gone[0].clone());
-        }
-
-        let unique: std::collections::HashSet<&String> = switched.iter().collect();
-        assert_eq!(
-            unique.len(),
-            PASSES.len(),
-            "two catalogue entries switch off the same job"
-        );
+        assert!(error.contains("Unexpected close tag"), "{error}");
     }
 
     #[test]
@@ -334,22 +353,38 @@ mod tests {
         }
     }
 
-    /// SVGO's camelCase plugin name -> the field name `serde` derives for it.
-    fn snake_case(name: &str) -> String {
-        let mut out = String::new();
-        let mut prev_lower = false;
-        for c in name.chars() {
-            if c.is_ascii_uppercase() {
-                if prev_lower {
-                    out.push('_');
-                }
-                out.push(c.to_ascii_lowercase());
-                prev_lower = false;
-            } else {
-                out.push(c);
-                prev_lower = c.is_ascii_lowercase() || c.is_ascii_digit();
-            }
+    /// A catalogue typo used to be a compile error against the Rust engine's fields. Against
+    /// SVGO it would be silent — an unknown name is not an error — so the names are checked
+    /// against the plugin list the bundle itself reports.
+    #[test]
+    fn every_catalogue_name_is_a_real_svgo_plugin() {
+        let known: Vec<String> = probe("__svgoPluginNames");
+        for name in PASSES
+            .iter()
+            .map(|p| p.name)
+            .chain(NEVER.iter().copied())
+        {
+            assert!(known.iter().any(|k| k == name), "SVGO has no plugin {name}");
         }
-        out
+    }
+
+    /// The other half of the same guard: an override for a plugin that is *not* part of
+    /// `preset-default` is only warned about, so a catalogue entry that stopped being part of the
+    /// preset would leave its checkbox doing nothing at all.
+    #[test]
+    fn every_catalogue_entry_is_part_of_the_default_preset() {
+        let _: Vec<String> = probe("__svgoTakeWarnings");
+
+        for pass in PASSES {
+            let mut options = OptimizeOptions::default();
+            options.passes.insert(pass.name.to_string(), false);
+            optimize(SAMPLE, &options).expect("optimise");
+            let warnings: Vec<String> = probe("__svgoTakeWarnings");
+            assert!(
+                warnings.is_empty(),
+                "switching {} off did nothing: {warnings:?}",
+                pass.name
+            );
+        }
     }
 }

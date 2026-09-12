@@ -10,6 +10,10 @@ native/*/target/
 *.so
 *.dylib
 
+# The SVGO bundle's build inputs (native/svgo_bundle) fetch esbuild + svgo; the artefact they
+# produce is committed, so the toolchain itself is not.
+node_modules/
+
 # Local tooling (Gradle distribution downloaded for local runs)
 .tooling/
 

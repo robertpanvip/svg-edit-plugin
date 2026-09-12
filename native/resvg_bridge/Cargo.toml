@@ -20,125 +20,16 @@ strip = "symbols"
 # down. "abort" would compile that safety net away.
 panic = "unwind"
 
-# ---- Optimiser built for size, not speed ----------------------------------------
+# ---- Optimiser ----------------------------------------------------------------
 #
-# The SVGO engine (`oxvg_*`) drags in lightningcss (a whole CSS parser/minifier, for
-# minifyStyles), the geo/i_overlay/spade path-arithmetic stack (for the path jobs) and a
-# regex/selector stack. Measured on the real sidecar, those crates are the difference between
-# 13.3 MB and 8.7 MB uncompressed (5.0 MB vs 3.5 MB deflated) — and the plugin pays that three
-# times over, once per OS sidecar. This is the single largest lever on the shipped zip.
+# No per-package opt-level overrides are needed here any more. The optimiser is no longer Rust
+# code compiled into this crate: it is SVGO itself, bundled to JavaScript (assets/svgo.browser.js)
+# and executed by the embedded QuickJS engine. Only `rquickjs-core` — the bindings — is Rust, and
+# the interpreter itself is C, so there is nothing on the optimiser path for `opt-level` to tune.
 #
-# It costs only optimiser speed, never render speed: every crate below is off the render path,
-# and every crate ON the render path (resvg, usvg, tiny-skia, rustybuzz, fontdb, ttf-parser,
-# svgtypes, roxmltree, ...) keeps the profile default of 3. SVGO is a one-shot job behind a
-# button, so a few times slower is a fair trade for ~4.6 MB off the download.
-#
-# If the SVGO button ever feels slow on large documents, raise these to "s" — that lands
-# between the two, still well under opt-level 3.
-[profile.release.package.lightningcss]
-opt-level = "z"
-[profile.release.package.lightningcss-derive]
-opt-level = "z"
-[profile.release.package.oxvg_ast]
-opt-level = "z"
-[profile.release.package.oxvg_collections]
-opt-level = "z"
-[profile.release.package.oxvg_optimiser]
-opt-level = "z"
-[profile.release.package.oxvg_parse]
-opt-level = "z"
-[profile.release.package.oxvg_path]
-opt-level = "z"
-[profile.release.package.oxvg_serialize]
-opt-level = "z"
-[profile.release.package.geo]
-opt-level = "z"
-[profile.release.package.geo-types]
-opt-level = "z"
-[profile.release.package.geographiclib-rs]
-opt-level = "z"
-[profile.release.package.spade]
-opt-level = "z"
-[profile.release.package.rstar]
-opt-level = "z"
-[profile.release.package.robust]
-opt-level = "z"
-[profile.release.package.earcut]
-opt-level = "z"
-[profile.release.package.float_next_after]
-opt-level = "z"
-[profile.release.package.i_overlay]
-opt-level = "z"
-[profile.release.package.i_shape]
-opt-level = "z"
-[profile.release.package.i_float]
-opt-level = "z"
-[profile.release.package.i_key_sort]
-opt-level = "z"
-[profile.release.package.i_tree]
-opt-level = "z"
-[profile.release.package.cssparser]
-opt-level = "z"
-[profile.release.package.cssparser-color]
-opt-level = "z"
-[profile.release.package.parcel_selectors]
-opt-level = "z"
-[profile.release.package.selectors]
-opt-level = "z"
-[profile.release.package.regex]
-opt-level = "z"
-[profile.release.package.regex-automata]
-opt-level = "z"
-[profile.release.package.regex-syntax]
-opt-level = "z"
-[profile.release.package.aho-corasick]
-opt-level = "z"
-[profile.release.package.dashmap]
-opt-level = "z"
-[profile.release.package.phf]
-opt-level = "z"
-[profile.release.package.rayon]
-opt-level = "z"
-[profile.release.package.rayon-core]
-opt-level = "z"
-[profile.release.package.schemars]
-opt-level = "z"
-[profile.release.package.dtoa]
-opt-level = "z"
-[profile.release.package.dtoa-short]
-opt-level = "z"
-[profile.release.package.convert_case]
-opt-level = "z"
-[profile.release.package.derive-where]
-opt-level = "z"
-[profile.release.package.derive_more]
-opt-level = "z"
-[profile.release.package.dyn-clone]
-opt-level = "z"
-[profile.release.package.servo_arc]
-opt-level = "z"
-[profile.release.package.precomputed-hash]
-opt-level = "z"
-[profile.release.package.ref-cast]
-opt-level = "z"
-[profile.release.package.nunny]
-opt-level = "z"
-[profile.release.package.bs58]
-opt-level = "z"
-[profile.release.package.hex]
-opt-level = "z"
-[profile.release.package.data-encoding]
-opt-level = "z"
-[profile.release.package.urlencoding]
-opt-level = "z"
-[profile.release.package.jiff]
-opt-level = "z"
-[profile.release.package.jiff-core]
-opt-level = "z"
-[profile.release.package.chrono]
-opt-level = "z"
-[profile.release.package.time]
-opt-level = "z"
+# Measured, per platform binary: the previous Rust optimiser contributed ~10.7 MB of linked code
+# (3.9 MB deflated); QuickJS plus the bundle is ~2.1 MB (0.9 MB deflated) — and the plugin ships
+# one copy per OS.
 
 [lib]
 name = "resvg_bridge"
@@ -152,11 +43,10 @@ usvg   = "=0.43.0"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 base64 = "0.22"
-# The SVGO engine, in Rust: `oxvg_ast` parses/serialises, `oxvg_optimiser` is the plugin pipeline
-# behind the SVGO button in both front ends (see `optimize.rs`). Pure Rust, so the standalone app
-# gains no Node dependency and the plugin reaches it through the sidecar it already runs.
-oxvg_ast = { version = "=0.0.7", features = ["roxmltree", "selectors"] }
-oxvg_optimiser = "=0.0.7"
+# The SVGO engine (see `optimize.rs`): QuickJS with the vendored C sources, so no system
+# JavaScript runtime and no Node process is needed at build or run time, on any of the three
+# platforms the sidecar is shipped for.
+rquickjs = "0.13"
 
 [[bin]]
 name = "svg_easy_sidecar"

@@ -104,7 +104,6 @@ const LABELS: &[(&str, &str)] = &[
     ("cleanupEnableBackground", "清理 enable-background"),
     ("convertColors", "颜色写法的等价最短形式"),
     ("convertTransform", "transform 写法的等价最短形式"),
-    ("removeDeprecatedAttrs", "移除已废弃属性"),
     ("removeUnknownsAndDefaults", "移除默认值与非法项"),
     ("removeNonInheritableGroupAttrs", "移除分组上不会继承的属性"),
     ("removeUselessStrokeAndFill", "移除无用的 stroke / fill"),
@@ -116,7 +115,6 @@ const LABELS: &[(&str, &str)] = &[
     ("convertEllipseToCircle", "正椭圆转 <circle>"),
     ("convertPathData", "路径数据最短化"),
     ("mergePaths", "合并相邻 <path>"),
-    ("applyTransforms", "把 transform 写进路径坐标"),
     ("moveElemsAttrsToGroup", "元素属性上提到分组"),
     ("moveGroupAttrsToElems", "分组属性下放到元素"),
 ];

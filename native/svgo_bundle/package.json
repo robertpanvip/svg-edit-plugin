@@ -1,0 +1,12 @@
+{
+  "name": "svg-easy-svgo-bundle",
+  "private": true,
+  "description": "Build input for the SVGO engine the sidecar embeds (see entry.js).",
+  "scripts": {
+    "build": "esbuild entry.js --bundle --platform=browser --format=iife --target=es2020 --minify --outfile=../resvg_bridge/assets/svgo.browser.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "svgo": "3.3.5"
+  }
+}
