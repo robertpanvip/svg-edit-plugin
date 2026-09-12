@@ -419,6 +419,9 @@ impl SvgEasyApp {
             // Opaque to the mouse, like [`modal`] — a prompt that only *looks* modal still lets the
             // canvas behind it take clicks and wheel events.
             .occlude()
+            // Same reason as [`modal`]: without a cursor of its own the backdrop lets the canvas's
+            // show through the prompt's buttons.
+            .cursor(CursorStyle::Arrow)
             .child(
                 div()
                     .flex()
@@ -1125,6 +1128,12 @@ fn modal(
         // painted but not *hit*, so gpui keeps reporting the canvas underneath as hovered: a wheel
         // over the dialog would still zoom the document behind it.
         .occlude()
+        // `occlude` keeps the *mouse* out but not the *cursor*: gpui shows the cursor of the
+        // topmost hovered element that declares one, and a backdrop that declares none lets the
+        // canvas's `.cursor(hover_cursor)` show through the dialog. Declaring Arrow here owns the
+        // pointer for the whole overlay; the rows and buttons below still override it with their
+        // own, since they paint later and so win the topmost-last lookup.
+        .cursor(CursorStyle::Arrow)
         .child(
             div()
                 .flex()
