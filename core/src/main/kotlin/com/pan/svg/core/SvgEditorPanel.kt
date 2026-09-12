@@ -31,7 +31,9 @@ import java.awt.geom.Rectangle2D
 import java.awt.image.BufferedImage
 import java.util.concurrent.Executors
 import javax.swing.JComponent
+import javax.swing.JMenuItem
 import javax.swing.JPanel
+import javax.swing.JPopupMenu
 import javax.swing.JScrollPane
 import javax.swing.SwingUtilities
 import javax.swing.Timer
@@ -761,6 +763,46 @@ class SvgEditorPanel(
         }
         emitStatus()
     }
+
+    /**
+     * The canvas right-click menu. Right-clicking an element that is not part of the current
+     * selection makes it the sole selection first, so the menu always acts on what was clicked.
+     * A single selection gets the layer-stacking moves; a multi-selection gets the align &
+     * distribute group instead (matching the standalone app's context menu).
+     */
+    fun showContextMenu(x: Int, y: Int) {
+        val (ix, iy) = toImage(x, y)
+        val hit = hitTestAt(ix, iy)
+        val clickedSelected = hit != null && (selectedId == hit.id || hit.id in selectedIds)
+        if (hit != null && !clickedSelected) selectOnly(hit.id)
+        val menu = JPopupMenu()
+        menu.add(JMenuItem("复制一份 (Ctrl+D)").apply { addActionListener { duplicateIds(selectedIds) } })
+        menu.addSeparator()
+        if (selectedIds.size == 1) {
+            menu.add(JMenuItem("置顶").apply { addActionListener { reorderSelection(Reorder.FRONT) } })
+            menu.add(JMenuItem("上移一层").apply { addActionListener { reorderSelection(Reorder.FORWARD) } })
+            menu.add(JMenuItem("下移一层").apply { addActionListener { reorderSelection(Reorder.BACKWARD) } })
+            menu.add(JMenuItem("置底").apply { addActionListener { reorderSelection(Reorder.BACK) } })
+        } else if (selectedIds.size >= 2) {
+            menu.add(alignItem("左对齐", Align.LEFT))
+            menu.add(alignItem("水平居中", Align.CENTER_H))
+            menu.add(alignItem("右对齐", Align.RIGHT))
+            menu.addSeparator()
+            menu.add(alignItem("顶对齐", Align.TOP))
+            menu.add(alignItem("垂直居中", Align.MIDDLE))
+            menu.add(alignItem("底对齐", Align.BOTTOM))
+            if (selectedIds.size >= 3) {
+                menu.addSeparator()
+                menu.add(JMenuItem("水平分布").apply { addActionListener { distributeSelection(Distribute.HORIZONTAL) } })
+                menu.add(JMenuItem("垂直分布").apply { addActionListener { distributeSelection(Distribute.VERTICAL) } })
+            }
+        }
+        if (menu.componentCount == 0 || selectedIds.isEmpty()) return
+        menu.show(canvas, x, y)
+    }
+
+    private fun alignItem(label: String, a: Align): JMenuItem =
+        JMenuItem(label).apply { addActionListener { alignSelection(a) } }
 
     // ---- selection helpers -------------------------------------------------
 
@@ -1771,6 +1813,7 @@ class SvgEditorPanel(
                             updateCursor()
                         }
                         SwingUtilities.isLeftMouseButton(e) -> handlePress(e.x, e.y)
+                        e.isPopupTrigger -> showContextMenu(e.x, e.y)
                     }
                 }
 
@@ -1780,6 +1823,8 @@ class SvgEditorPanel(
                         updateCursor()
                     } else if (SwingUtilities.isLeftMouseButton(e)) {
                         handleRelease(e.x, e.y)
+                    } else if (e.isPopupTrigger) {
+                        showContextMenu(e.x, e.y)
                     }
                 }
 
@@ -1876,6 +1921,12 @@ class SvgEditorPanel(
             // Delete / Backspace: remove the selection from the document.
             e.keyCode == KeyEvent.VK_DELETE || e.keyCode == KeyEvent.VK_BACK_SPACE -> {
                 deleteSelected()
+                e.consume()
+                true
+            }
+
+            e.isControlDown && e.keyCode == KeyEvent.VK_D -> {
+                duplicateIds(selectedIds)
                 e.consume()
                 true
             }

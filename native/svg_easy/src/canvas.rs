@@ -1276,20 +1276,42 @@ impl SvgEasyApp {
 
     /// Canvas-scoped keys only.
     ///
-    /// Delete and Escape mean "edit the text" while the XML pane has focus, so they stay scoped to
-    /// the canvas; the document-level shortcuts (Ctrl+S/O/0/±) live on the root and reach this
-    /// element by bubbling.
+    /// Delete/Escape/Ctrl+C/V/D mean "edit the document", so they stay scoped to the canvas;
+    /// the XML pane keeps Delete for its own text editing and should not get Ctrl+C/V stolen
+    /// (copying highlighted source text). The document-level shortcuts (Ctrl+S/O/0/±) live on
+    /// the root and reach this element by bubbling.
     fn on_canvas_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if ev.keystroke.modifiers.secondary() {
-            return;
-        }
-        match ev.keystroke.key.as_str() {
-            "delete" | "backspace" => {
+        let ctrl = ev.keystroke.modifiers.secondary();
+        match (ctrl, ev.keystroke.key.as_str()) {
+            // 复制一份 (Ctrl+D): clone every selected shape as a sibling, offset so it is visible.
+            (true, "d") => {
+                if self.editor.duplicate_selection() {
+                    self.after_document_edit(window, cx);
+                }
+            }
+            // Copy (Ctrl+C): remember the selection for Paste.
+            (true, "c") => {
+                if self.editor.has_selection() {
+                    self.editor.copy_selection();
+                    self.status = Some((
+                        format!("已复制 {} 个图形", self.editor.selection.len()),
+                        false,
+                    ));
+                    cx.notify();
+                }
+            }
+            // Paste (Ctrl+V): clone whatever was copied, cascading each consecutive paste.
+            (true, "v") => {
+                if self.editor.paste_clipboard() {
+                    self.after_document_edit(window, cx);
+                }
+            }
+            (false, "delete") | (false, "backspace") => {
                 if self.editor.delete_selection() {
                     self.after_document_edit(window, cx);
                 }
             }
-            "escape" => {
+            (false, "escape") => {
                 self.editor.clear_selection();
                 cx.notify();
             }

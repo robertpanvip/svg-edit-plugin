@@ -742,6 +742,26 @@ impl Session {
         Ok(self.doc.serialize(&Mode::Full))
     }
 
+    /// Duplicates `node_id` as a sibling right after it, shifted by (`dx`, `dy`) document
+    /// units. Returns the updated document source and the clone's new `node_id`.
+    ///
+    /// The offset is applied in root space (like any selection move), then serialized back into
+    /// the source, so the clone is immediately visible next to the original and the canvas
+    /// auto-projects it on re-parse.
+    pub fn duplicate(&mut self, node_id: usize, dx: f64, dy: f64) -> Result<(String, usize), String> {
+        let idx = self
+            .doc
+            .find_by_node_id(node_id)
+            .ok_or_else(|| format!("unknown nodeId {node_id}"))?;
+        let new_idx = self
+            .doc
+            .duplicate(idx)
+            .ok_or_else(|| format!("cannot duplicate nodeId {node_id}"))?;
+        let new_node_id = self.doc.element(new_idx).map(|e| e.node_id).unwrap_or(0);
+        let source = self.apply_transform(new_node_id, Mat::translate(dx, dy))?;
+        Ok((source, new_node_id))
+    }
+
     /// Removes the subtree rooted at `node_id` and returns the updated document source.
     ///
     /// The non-rendering half of [Self::remove], for the same reason as [Self::apply_transform].
@@ -1182,5 +1202,61 @@ mod tests {
         assert_eq!(s.hit_test(450.0, 380.0, 0.5), Some(node)); // top band
         assert_eq!(s.hit_test(450.0, 522.0, 0.5), None); // hollow centre
         assert_eq!(s.hit_test(800.0, 800.0, 0.5), None); // outside
+    }
+
+    #[test]
+    fn duplicate_clones_the_element_renames_id_and_offsets_it() {
+        let mut s = Session::new(SAMPLE).unwrap();
+        let (svg, new_id) = s.duplicate(3, 10.0, 5.0).unwrap();
+        // The original is untouched, the clone is a fresh sibling with a unique id…
+        assert!(svg.contains("id='box-a'"), "original keeps its id");
+        assert!(
+            svg.contains("id=\"copy-of-box-a\"") || svg.contains("id=\"copy-of-box-a-\""),
+            "clone id is renamed to be unique, got: {svg}",
+        );
+        // …offset by (10,5) document units from the original (20x20 -> starts at 20,15).
+        let (x, y, w, h) = box_of(&s.layout_json(), new_id);
+        assert_eq!((x, y, w, h), (20.0, 15.0, 50.0, 50.0));
+        // Round-trip fidelity is preserved around the new element.
+        assert!(svg.contains("<!-- drawn by hand -->"));
+        assert_eq!(s.hit_test(25.0, 20.0, 0.5), Some(3), "original still hit");
+    }
+
+    #[test]
+    fn duplicate_group_keeps_members_and_unique_renames_each() {
+        let mut s = Session::new(SAMPLE).unwrap();
+        // Duplicate the group (node 5) containing the dot (node 6).
+        let (_, new_grp) = s.duplicate(5, 0.0, 0.0).unwrap();
+        let svg = s.doc.serialize(&Mode::Full);
+        assert!(svg.contains("id=\"copy-of-grp\"") || svg.contains("id=\"copy-of-grp-\""));
+        // The group's child (dot) was also given a fresh unique id.
+        let ids: Vec<String> = s.layout_json()["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| e["id"].as_str())
+            .map(String::from)
+            .collect();
+        let dot_clones = ids.iter().filter(|s| s.starts_with("copy-of-dot")).count();
+        assert_eq!(dot_clones, 1, "the cloned dot got one unique name");
+        let _ = new_grp;
+        // Unknown / already-removed nodes error.
+        assert!(s.duplicate(9999, 0.0, 0.0).is_err());
+    }
+
+    #[test]
+    fn duplicating_twice_keeps_producing_distinct_ids() {
+        let mut s = Session::new(SAMPLE).unwrap();
+        let (_, a) = s.duplicate(3, 10.0, 0.0).unwrap();
+        let (svg, b) = s.duplicate(3, 20.0, 0.0).unwrap();
+        assert_ne!(a, b, "two clones get distinct node ids");
+        let copy_a = format!("\"copy-of-box-a\"");
+        let copy_b = format!("\"{}\"", "copy-of-box-a-1");
+        assert!(svg.contains(&copy_a) || svg.contains(&copy_b), "{svg}");
+        assert!(svg.contains("copy-of-box-a"), "at least one clone is named");
+        assert!(
+            svg.matches("copy-of-box-a").count() >= 2,
+            "both clones appear (first copy-of-box-a, second copy-of-box-a-1)",
+        );
     }
 }

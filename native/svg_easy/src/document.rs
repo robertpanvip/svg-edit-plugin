@@ -30,6 +30,23 @@ pub const DEFAULT_DOC: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
   </g>
 </svg>"##;
 
+/// Align & distribute operations acted over the selection as a whole.
+///
+/// The six align modes snap every selected element's frame to one edge/centre of the **union**
+/// frame of all of them; the two distribute modes space a run of ≥3 elements evenly so the gaps
+/// between them are equal (the outer two stay put).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Align {
+    Left,
+    CenterH,
+    Right,
+    Top,
+    CenterV,
+    Bottom,
+    DistributeH,
+    DistributeV,
+}
+
 /// What the New action starts from: an empty canvas at a sensible default size, so the document is
 /// immediately valid SVG rather than an empty pane.
 pub const NEW_DOC: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
@@ -47,6 +64,8 @@ pub struct Editor {
     pub parse_error: Option<String>,
     /// Node ids of the selected elements, in the order they were added.
     pub selection: Vec<usize>,
+    /// Node ids remembered by Copy, re-placed by Paste. Empty until something is copied.
+    pub clipboard: Vec<usize>,
     /// The text as of the last successful save (or load). "Dirty" is derived from it rather than
     /// tracked separately, so undoing back to the saved state clears the marker honestly.
     saved_source: String,
@@ -85,6 +104,7 @@ impl Editor {
             session: None,
             parse_error: None,
             selection: Vec::new(),
+            clipboard: Vec::new(),
             history: Vec::new(),
             future: Vec::new(),
             last_text_edit: None,
@@ -339,6 +359,162 @@ impl Editor {
             Some(source) => {
                 self.source = source;
                 self.selection.clear();
+                self.record_structural(before);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Copies the current selection to the editor clipboard, ready for Paste.
+    pub fn copy_selection(&mut self) {
+        self.clipboard = self.selection.clone();
+    }
+
+    /// Duplicate every selected element ("复制一份", Ctrl+D): each shape is cloned as a sibling
+    /// painted on top of it and shifted by a small cascade so the copies are visible. Returns true
+    /// when anything changed. The selection moves onto the freshly made copies.
+    pub fn duplicate_selection(&mut self) -> bool {
+        self.duplicate_ids(self.selection.clone())
+    }
+
+    /// Re-places the copied shapes (Ctrl+V), cascading each one so consecutive pastes do not
+    /// stack invisibly. Returns true when anything changed.
+    pub fn paste_clipboard(&mut self) -> bool {
+        if self.clipboard.is_empty() {
+            return false;
+        }
+        self.duplicate_ids(self.clipboard.clone())
+    }
+
+    /// Clones every node id in `ids` as siblings, offsetting the `n`-th copy by
+    /// (`10*n`, `10*n`) units so a run of duplicates fans out instead of overlapping.
+    /// Returns true when at least one clone was made. The selection becomes the new shapes.
+    fn duplicate_ids(&mut self, ids: Vec<usize>) -> bool {
+        if ids.is_empty() {
+            return false;
+        }
+        let before = self.snapshot();
+        let mut new_ids: Vec<usize> = Vec::new();
+        let mut updated = None;
+        if let Some(session) = self.session.as_mut() {
+            let mut n = 1;
+            for id in ids {
+                match session.duplicate(id, 10.0 * n as f64, 10.0 * n as f64) {
+                    Ok((source, new_id)) => {
+                        updated = Some(source);
+                        new_ids.push(new_id);
+                    }
+                    // A selection id can outlive its element (e.g. after a source edit); skip
+                    // rather than aborting the whole duplicate.
+                    Err(_) => {}
+                }
+                n += 1;
+            }
+        }
+        match updated {
+            Some(source) => {
+                self.source = source;
+                self.selection = new_ids;
+                self.record_structural(before);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Aligns or distributes the selection, as one undo step. Returns true when anything moved.
+    ///
+    /// Alignment snaps every selected element to one edge/centre of the selection's union frame
+    /// — see [`Align`]. Because the step is a per-element translation (not the shared matrix that
+    /// `transform_selection` applies to move/scale as a unit), each shape can be given the exact
+    /// delta that places it on the target line.
+    pub fn align_selection(&mut self, mode: Align) -> bool {
+        if self.selection.is_empty() {
+            return false;
+        }
+        let Some(frame) = self.selection_frame() else {
+            return false;
+        };
+        let Some(session) = self.session.as_ref() else {
+            return false;
+        };
+        let layout = session.layout_json();
+        let [fx, fy, fw, fh] = frame;
+        use Align::*;
+
+        // (element, dx, dy) in document units, computed against the pre-move geometry.
+        let mut steps: Vec<(usize, f64, f64)> = Vec::new();
+        match mode {
+            Left | CenterH | Right => {
+                for &id in &self.selection {
+                    let Some(b) = box_of(&layout, id) else { continue };
+                    let dx = match mode {
+                        Left => fx - b[0],
+                        CenterH => (fx + fw / 2.0) - (b[0] + b[2] / 2.0),
+                        Right => (fx + fw) - (b[0] + b[2]),
+                        _ => unreachable!(),
+                    };
+                    steps.push((id, dx, 0.0));
+                }
+            }
+            Top | CenterV | Bottom => {
+                for &id in &self.selection {
+                    let Some(b) = box_of(&layout, id) else { continue };
+                    let dy = match mode {
+                        Top => fy - b[1],
+                        CenterV => (fy + fh / 2.0) - (b[1] + b[3] / 2.0),
+                        Bottom => (fy + fh) - (b[1] + b[3]),
+                        _ => unreachable!(),
+                    };
+                    steps.push((id, 0.0, dy));
+                }
+            }
+            DistributeH | DistributeV => {
+                // Space the run so the gaps are equal: only the outermost two stay put.
+                let horizontal = mode == DistributeH;
+                let mut run: Vec<(usize, f64, f64)> = self
+                    .selection
+                    .iter()
+                    .filter_map(|&id| {
+                        let b = box_of(&layout, id)?;
+                        Some((id, if horizontal { b[0] } else { b[1] }, if horizontal { b[2] } else { b[3] }))
+                    })
+                    .collect();
+                if run.len() < 3 {
+                    return false; // nothing to spread between two shapes.
+                }
+                run.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+                let size_sum: f64 = run.iter().map(|x| x.2).sum();
+                let span = if horizontal { fw } else { fh };
+                let start = if horizontal { fx } else { fy };
+                let gap = (span - size_sum) / (run.len() - 1) as f64;
+                let mut acc = start;
+                for (id, lead, size) in run {
+                    steps.push((id, if horizontal { acc - lead } else { 0.0 }, if horizontal { 0.0 } else { acc - lead }));
+                    acc += size + gap;
+                }
+            }
+        }
+
+        if steps.is_empty() {
+            return false;
+        }
+        let before = self.snapshot();
+        let mut updated = None;
+        if let Some(session) = self.session.as_mut() {
+            for (id, dx, dy) in steps {
+                if dx == 0.0 && dy == 0.0 {
+                    continue; // an element already on the line needs no move.
+                }
+                if let Ok(source) = session.apply_transform(id, Mat::translate(dx, dy)) {
+                    updated = Some(source);
+                }
+            }
+        }
+        match updated {
+            Some(source) => {
+                self.source = source;
                 self.record_structural(before);
                 true
             }
@@ -777,6 +953,87 @@ mod tests {
             .rmatch_indices("id=\"")
             .next()
             .and_then(|(at, _)| source[at + "id=\"".len()..].split('"').next())
+    }
+
+    #[test]
+    fn duplicate_copies_the_element_and_reselects_the_copy() {
+        let mut e = editor();
+        let card = e.hit(60.0, 60.0, 2.0).expect("card must be hit");
+        e.select_only(card);
+        let before_count = e.selection_boxes().len();
+
+        assert!(e.duplicate_selection());
+        // A copy was made: selection now holds exactly one element (the clone)…
+        assert_eq!(e.selection.len(), 1);
+        assert_ne!(e.selection[0], card, "selection moves to the clone, not the original");
+        // …the clone sits below-right of the original…
+        let orig = e.selection_boxes();
+        assert_eq!(orig.len(), 1, "the clone resolves to a box");
+        // …and the id was renamed to be unique while the original keeps its own.
+        assert!(e.source.contains("id=\"copy-of-card\"") || e.source.contains("id=\"copy-of-card-\""));
+        assert!(e.source.contains("id=\"card\""));
+        assert!(e.dirty());
+        assert!(e.parse_error.is_none());
+
+        // Undo restores the source exactly and the copy disappears.
+        assert!(e.undo());
+        assert!(!e.source.contains("copy-of-card"));
+        assert_eq!(e.selection, vec![card]);
+        let _ = before_count;
+    }
+
+    #[test]
+    fn copy_then_paste_replaces_the_copied_shapes() {
+        let mut e = editor();
+        let card = e.hit(60.0, 60.0, 2.0).expect("card must be hit");
+        e.select_only(card);
+        let original = e.source.clone();
+
+        e.copy_selection();
+        // Paste the remembered selection as clones.
+        assert!(e.paste_clipboard());
+        assert_eq!(e.selection.len(), 1);
+        assert_ne!(e.selection[0], card);
+        assert!(e.dirty());
+
+        // Undo removes the paste but keeps the clipboard; re-pasting makes a fresh clone.
+        assert!(e.undo());
+        assert_eq!(e.source, original);
+        assert!(e.paste_clipboard(), "paste from the earlier clipboard works again");
+        assert_eq!(e.selection.len(), 1);
+    }
+
+    #[test]
+    fn pasting_after_undo_with_stale_clipboard_is_a_safe_noop() {
+        let mut e = editor();
+        let card = e.hit(60.0, 60.0, 2.0).expect("card must be hit");
+        e.select_only(card);
+        e.copy_selection();
+        assert!(e.paste_clipboard(), "first paste clones the card");
+        let clone = e.selection[0];
+        e.copy_selection(); // remember the clone
+        assert!(e.undo(), "undo removes the clone");
+        // The clipboard still names the now-gone clone; pasting resolves nothing and is a safe
+        // no-op (no corruption, nothing inserted) rather than an error.
+        let restored = e.source.clone();
+        assert!(!e.paste_clipboard());
+        assert_eq!(e.selection, vec![card], "selection keeps the real element");
+        assert_eq!(e.source, restored, "a stale paste touches nothing");
+        let _ = clone;
+    }
+
+    #[test]
+    fn duplicate_is_a_single_undoable_step() {
+        let mut e = editor();
+        let original = e.source.clone();
+        let card = e.hit(60.0, 60.0, 2.0).expect("card must be hit");
+        e.select_only(card);
+
+        assert!(e.duplicate_selection());
+        assert!(e.can_undo());
+        assert!(e.undo());
+        assert_eq!(e.source, original, "one undo puts the verbatim original back");
+        assert_eq!(e.selection, vec![card]);
     }
 
     #[test]

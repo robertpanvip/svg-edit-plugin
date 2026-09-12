@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use gpui::{
     AppContext as _, Bounds, Context, CursorStyle, Entity, FocusHandle, IntoElement, KeyDownEvent,
-    ParentElement, PathPromptOptions, Pixels, Render, Styled, Subscription, Window, div, point,
-    prelude::*, px, rgba, rgb,
+    ParentElement, PathPromptOptions, Pixels, Render, Styled, Subscription, WeakEntity, Window, div,
+    point, prelude::*, px, rgba, rgb,
 };
 use gpui_component::{
     Disableable, Selectable, h_resizable,
@@ -496,29 +496,80 @@ impl SvgEasyApp {
     ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
         let view = cx.weak_entity();
         move |menu, _window, cx| {
-            let single = view
-                .read_with(cx, |view, _| view.editor.selection.len() == 1)
-                .unwrap_or(false);
-            if !single {
+            let len = view
+                .read_with(cx, |view, _| view.editor.selection.len())
+                .unwrap_or(0);
+            if len == 0 {
                 return menu;
             }
-            [
-                ("置顶", Stack::Front),
-                ("上移一层", Stack::Forward),
-                ("下移一层", Stack::Backward),
-                ("置底", Stack::Back),
+
+            // A single shape gets the layer-stacking moves.
+            if len == 1 {
+                return [
+                    ("置顶", Stack::Front),
+                    ("上移一层", Stack::Forward),
+                    ("下移一层", Stack::Backward),
+                    ("置底", Stack::Back),
+                ]
+                .into_iter()
+                .fold(menu, |menu, (label, to)| {
+                    let view = view.clone();
+                    menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                        view.update(cx, |this, cx| {
+                            if this.editor.restack_selection(to) {
+                                this.after_document_edit(window, cx);
+                            }
+                        })
+                        .ok();
+                    }))
+                });
+            }
+
+            // Alignment & distribution act on the selection's union frame: six align modes snap
+            // every shape to one edge/centre; the two distribute modes spread a run of ≥3 evenly.
+            let add = |menu: PopupMenu,
+                       label: &'static str,
+                       mode: document::Align,
+                       disabled: bool,
+                       view: WeakEntity<SvgEasyApp>|
+             -> PopupMenu {
+                let view = view.clone();
+                menu.item(
+                    PopupMenuItem::new(label)
+                        .disabled(disabled)
+                        .on_click(move |_, window, cx| {
+                            view.update(cx, |this, cx| {
+                                if this.editor.align_selection(mode) {
+                                    this.after_document_edit(window, cx);
+                                }
+                            })
+                            .ok();
+                        }),
+                )
+            };
+            let menu = [
+                ("左对齐", document::Align::Left),
+                ("水平居中", document::Align::CenterH),
+                ("右对齐", document::Align::Right),
             ]
             .into_iter()
-            .fold(menu, |menu, (label, to)| {
-                let view = view.clone();
-                menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                    view.update(cx, |this, cx| {
-                        if this.editor.restack_selection(to) {
-                            this.after_document_edit(window, cx);
-                        }
-                    })
-                    .ok();
-                }))
+            .fold(menu, |menu, (label, mode)| add(menu, label, mode, false, view.clone()));
+            let menu = menu.item(PopupMenuItem::separator());
+            let menu = [
+                ("顶对齐", document::Align::Top),
+                ("垂直居中", document::Align::CenterV),
+                ("底对齐", document::Align::Bottom),
+            ]
+            .into_iter()
+            .fold(menu, |menu, (label, mode)| add(menu, label, mode, false, view.clone()));
+            let menu = menu.item(PopupMenuItem::separator());
+            [
+                ("水平分布", document::Align::DistributeH),
+                ("垂直分布", document::Align::DistributeV),
+            ]
+            .into_iter()
+            .fold(menu, |menu, (label, mode)| {
+                add(menu, label, mode, len < 3, view.clone())
             })
         }
     }

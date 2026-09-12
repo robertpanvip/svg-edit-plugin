@@ -326,6 +326,48 @@ impl Document {
         true
     }
 
+    /// Duplicates the subtree rooted at `idx`, inserting the clone as the sibling
+    /// immediately after the original (so it paints on top of it). Returns the new root's
+    /// arena index, or `None` when `idx` cannot be duplicated.
+    ///
+    /// The clone is a live copy: every element gets a fresh `node_id`, any `id` attribute is
+    /// renamed to a unique one (SVG ids must not collide or `usvg` would mis-map them), and the
+    /// whole subtree is marked `dirty` so serialization rebuilds it from the tree instead of
+    /// recycling the original's source span (which points at the wrong position now).
+    pub fn duplicate(&mut self, idx: usize) -> Option<usize> {
+        if idx == 0 || self.removed[idx] {
+            return None;
+        }
+        let parent = self.element(idx).map(|e| e.parent).unwrap_or(0);
+
+        let mut ids: HashSet<String> = self
+            .nodes
+            .iter()
+            .filter_map(|n| match n {
+                NodeKind::Element(e) => e.attr("id"),
+                _ => None,
+            })
+            .collect();
+        let next_id = self
+            .nodes
+            .iter()
+            .filter_map(|n| match n {
+                NodeKind::Element(e) => Some(e.node_id),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+            + 1;
+
+        let new_root = clone_subtree(&mut self.nodes, &mut self.removed, &mut ids, idx, parent, next_id);
+        let parent_el = self.element_mut(parent).expect("parent exists");
+        if let Some(pos) = parent_el.children.iter().position(|&c| c == idx) {
+            parent_el.children.insert(pos + 1, new_root);
+        }
+        parent_el.dirty = true;
+        Some(new_root)
+    }
+
     /// Chain of arena indices from the root (inclusive) down to `idx`.
     pub fn path_to(&self, idx: usize) -> Vec<usize> {
         let mut out = vec![idx];
@@ -447,6 +489,67 @@ impl Document {
             | NodeKind::Decl(s) => out.push_str(s),
         }
     }
+}
+
+/// Deep-clones the subtree rooted at `src` (a live copy: new arena slots, fresh `node_id`s,
+/// unique `id` attrs, and `dirty` elements so they serialize from the tree). Returns the new
+/// root's arena index.
+fn clone_subtree(
+    nodes: &mut Vec<NodeKind>,
+    removed: &mut Vec<bool>,
+    ids: &mut HashSet<String>,
+    src: usize,
+    parent: usize,
+    mut next_id: usize,
+) -> usize {
+    let new_idx = nodes.len();
+    match &nodes[src] {
+        NodeKind::Element(el) => {
+            let mut e = ElementData {
+                name: el.name.clone(),
+                attrs: el.attrs.clone(),
+                children: Vec::new(),
+                self_closing: el.self_closing,
+                dirty: true,
+                node_id: next_id,
+                parent,
+                open_span: (0, 0),
+                close_span: None,
+            };
+            next_id += 1;
+            // Rename the `id` attribute (if any) so it stays unique across the document.
+            if let Some(old) = e.attr("id") {
+                let base = format!("copy-of-{old}");
+                let mut candidate = base.clone();
+                let mut k = 1;
+                while ids.contains(&candidate) {
+                    candidate = format!("{base}-{k}");
+                    k += 1;
+                }
+                if let Some(a) = e.attrs.iter_mut().find(|a| a.name == "id") {
+                    a.raw_value = format!("\"{candidate}\"");
+                }
+                ids.insert(candidate);
+            }
+            let child_snapshot: Vec<usize> = el.children.iter().copied().collect();
+            nodes.push(NodeKind::Element(e));
+            removed.push(false);
+            let children: Vec<usize> = child_snapshot
+                .into_iter()
+                .map(|c| clone_subtree(nodes, removed, ids, c, new_idx, next_id))
+                .collect();
+            if let NodeKind::Element(ee) = &mut nodes[new_idx] {
+                ee.children = children;
+            }
+        }
+        NodeKind::Text(s) => nodes.push(NodeKind::Text(s.clone())),
+        NodeKind::Comment(s) => nodes.push(NodeKind::Comment(s.clone())),
+        NodeKind::Cdata(s) => nodes.push(NodeKind::Cdata(s.clone())),
+        NodeKind::Processing(s) => nodes.push(NodeKind::Processing(s.clone())),
+        NodeKind::Decl(s) => nodes.push(NodeKind::Decl(s.clone())),
+    }
+    removed.push(false);
+    new_idx
 }
 
 fn push_child(nodes: &mut Vec<NodeKind>, stack: &[usize], node: NodeKind) {
