@@ -33,3 +33,25 @@ serde_json = "1"
 # compiler. Target-gated: on Linux and macOS the build script compiles to nothing.
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+
+# Size tuning for the shipped archive.
+#
+# This block is a deliberate duplicate of `resvg_bridge`'s: Cargo reads `[profile.*]` only from the
+# root manifest of a build, and the two crates are separate packages rather than one workspace, so
+# whichever is the root ignores the other's block. Building `svg_easy` with no block of its own is
+# what put the archive on the default profile — no LTO, 16 codegen units, and a full symbol table.
+#
+# `thin`, not `fat`: the app links gpui and its whole widget tree, and whole-program LTO over that
+# peaks well past what a modest build machine has (it was OOM-killed at ~5 GB here). Thin LTO gets
+# the cross-crate inlining and dead-code removal — which is where the size win is — while keeping
+# the peak far lower. `resvg_bridge` still uses `fat`, which its much smaller tree can afford.
+#
+# opt-level stays at the default (3). The render path runs in *this* process, and `resvg_bridge`
+# measured "s" and "z" to be 2.5x / 4.4x slower at drawing a 600-shape document, which an
+# interactive editor cannot pay.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+# Unlike the sidecar, nothing loads this binary dynamically — there is no JNA on the other end —
+# so the symbols serve no purpose at runtime.
+strip = "symbols"
