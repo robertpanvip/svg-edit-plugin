@@ -69,37 +69,48 @@ impl Session {
         let width = tree.size().width() as f64;
         let height = tree.size().height() as f64;
 
-        // Synthesized ids first so explicit user ids win on collision.
-        let mut id_to_node = HashMap::new();
-        for idx in doc.element_indices() {
-            let el = doc.element(idx).unwrap();
-            id_to_node.insert(format!("e{}", el.node_id), el.node_id);
-        }
-        for idx in doc.element_indices() {
-            if let Some(uid) = doc.element(idx).unwrap().attr("id") {
-                id_to_node.insert(uid, doc.element(idx).unwrap().node_id);
-            }
-        }
-
         let mut s = Session {
             doc,
             tree,
-            id_to_node,
+            id_to_node: HashMap::new(),
             boxes: HashMap::new(),
             width,
             height,
         };
+        s.reindex_ids();
         s.recollect_boxes();
         Ok(s)
     }
 
-    /// Re-parses the injected DOM into a fresh usvg tree and refreshes boxes.
+    /// Rebuilds the usvg-id -> editor-node-id index from the arena.
+    ///
+    /// This has to run on every projection rebuild, not only at construction: `hit_node` resolves
+    /// a usvg node back to an editor node *through this map*, and `duplicate` gives its clone a
+    /// renamed `id` (`copy-of-…`). A stale map has never seen that name, so the clone would paint
+    /// but never be hit — clicking it selected whatever lay underneath, or nothing at all.
+    fn reindex_ids(&mut self) {
+        // Synthesized ids first so explicit user ids win on collision.
+        let mut id_to_node = HashMap::new();
+        for idx in self.doc.element_indices() {
+            let el = self.doc.element(idx).unwrap();
+            id_to_node.insert(format!("e{}", el.node_id), el.node_id);
+        }
+        for idx in self.doc.element_indices() {
+            if let Some(uid) = self.doc.element(idx).unwrap().attr("id") {
+                id_to_node.insert(uid, self.doc.element(idx).unwrap().node_id);
+            }
+        }
+        self.id_to_node = id_to_node;
+    }
+
+    /// Re-parses the injected DOM into a fresh usvg tree and refreshes boxes and the id index.
     /// The usvg tree is a projection only; edit state never lives here.
     fn rebuild_projection(&mut self) -> Result<(), String> {
         let injected = self.doc.serialize(&Mode::InjectIds);
         self.tree = Tree::from_str(&injected, &usvg_options()).map_err(|e| e.to_string())?;
         self.width = self.tree.size().width() as f64;
         self.height = self.tree.size().height() as f64;
+        self.reindex_ids();
         self.recollect_boxes();
         Ok(())
     }
@@ -1219,7 +1230,18 @@ mod tests {
         assert_eq!((x, y, w, h), (20.0, 15.0, 50.0, 50.0));
         // Round-trip fidelity is preserved around the new element.
         assert!(svg.contains("<!-- drawn by hand -->"));
-        assert_eq!(s.hit_test(25.0, 20.0, 0.5), Some(3), "original still hit");
+        // Both resolve to a hit. The clone is a sibling inserted after the original, so it wins
+        // the overlap — it paints on top — while the original keeps the strip only it covers.
+        assert_eq!(
+            s.hit_test(25.0, 20.0, 0.5),
+            Some(new_id),
+            "the clone takes the overlap"
+        );
+        assert_eq!(
+            s.hit_test(12.0, 12.0, 0.5),
+            Some(3),
+            "the original keeps the area only it covers"
+        );
     }
 
     #[test]

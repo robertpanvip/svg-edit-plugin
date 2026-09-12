@@ -632,10 +632,11 @@ impl SvgEasyApp {
 
     /// The action bar.
     ///
-    /// The order is the one the IntelliJ-side toolbar lays out (`core/EditorToolbar.kt`): the
-    /// interaction tools, then the file actions, then zoom, then the view toggles. The file,
-    /// history and delete groups are the standalone app's own — there is no IDE menu to fall back
-    /// on here — but they keep the same icon-button shape and separators.
+    /// File actions (new / open / save) lead the row beside the title: they act on the whole
+    /// document rather than on whatever is under the pointer. The rest, after the spacer, follows
+    /// the shape `core/EditorToolbar.kt` lays out for the IntelliJ side — interaction tools,
+    /// history, zoom, the view toggles — plus the selection, format and SVGO actions, which have no
+    /// IDE menu to fall back on here and so keep the same icon-button shape and separators.
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let title = self.editor.title();
         // The real scale, not the fit-relative zoom, so "100%" means one unit per pixel.
@@ -663,6 +664,34 @@ impl SvgEasyApp {
                     .text_color(rgb(0xe6e6e6))
                     .child(title),
             )
+            // File actions lead the row, right after the title: they act on the whole document, so
+            // they sit with the title rather than among the buttons that act on whatever is under
+            // the pointer.
+            .child(separator())
+            .child(self.tool_button(
+                "new",
+                ToolbarIcon::New,
+                "新建空白文档（Ctrl+N）",
+                true,
+                cx,
+                |this, window, cx| this.request_new(window, cx),
+            ))
+            .child(self.tool_button(
+                "open",
+                ToolbarIcon::Open,
+                "打开 SVG 文件（Ctrl+O）",
+                true,
+                cx,
+                |this, window, cx| this.prompt_open(window, cx),
+            ))
+            .child(self.tool_button(
+                "save",
+                ToolbarIcon::Save,
+                "把文档写回磁盘（Ctrl+S），另存为 Ctrl+Shift+S",
+                true,
+                cx,
+                |this, window, cx| this.save(window, cx),
+            ))
             .child(div().flex_1())
             .child(self.toggle_button(
                 "tool-move",
@@ -702,31 +731,6 @@ impl SvgEasyApp {
                 can_redo,
                 cx,
                 |this, window, cx| this.redo(window, cx),
-            ))
-            .child(separator())
-            .child(self.tool_button(
-                "new",
-                ToolbarIcon::New,
-                "新建空白文档（Ctrl+N）",
-                true,
-                cx,
-                |this, window, cx| this.request_new(window, cx),
-            ))
-            .child(self.tool_button(
-                "open",
-                ToolbarIcon::Open,
-                "打开 SVG 文件（Ctrl+O）",
-                true,
-                cx,
-                |this, window, cx| this.prompt_open(window, cx),
-            ))
-            .child(self.tool_button(
-                "save",
-                ToolbarIcon::Save,
-                "把文档写回磁盘（Ctrl+S），另存为 Ctrl+Shift+S",
-                true,
-                cx,
-                |this, window, cx| this.save(window, cx),
             ))
             .child(separator())
             .child(self.tool_button(
