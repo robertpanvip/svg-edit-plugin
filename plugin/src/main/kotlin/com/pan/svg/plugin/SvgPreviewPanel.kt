@@ -8,6 +8,7 @@ import com.pan.svg.core.showSvgoResultDialog
 import com.pan.svg.core.showSvgoSettingsDialog
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.editor.Document
@@ -458,7 +459,12 @@ class SvgPreviewPanel(
                     }
                     return@executeOnPooledThread
                 }
-            SwingUtilities.invokeLater {
+            // `SwingUtilities.invokeLater` posts straight onto the AWT queue, bypassing the
+            // platform's transaction machinery, so the write below would run in a write-unsafe
+            // context and `doc.setText` would throw ("Write-unsafe context! ... current
+            // modality=ModalityState.NON_MODAL"). The platform `invokeLater` with a concrete
+            // modality registers a write-safe transaction, which is what a document write needs.
+            ApplicationManager.getApplication().invokeLater({
                 if (doc != null && result.svg != source) {
                     // No suppressReload here: the canvas still shows the pre-optimization text, so
                     // the debounced DocumentListener reload is exactly what brings it in sync.
@@ -467,7 +473,7 @@ class SvgPreviewPanel(
                     }
                 }
                 showSvgoResultDialog(panel, result)
-            }
+            }, ModalityState.defaultModalityState())
         }
     }
 
@@ -501,7 +507,9 @@ class SvgPreviewPanel(
                     }
                     return@executeOnPooledThread
                 }
-            SwingUtilities.invokeLater {
+            // Platform `invokeLater` (not `SwingUtilities.invokeLater`) so the document write runs
+            // in a write-safe transaction — see [runSvgo] for the details.
+            ApplicationManager.getApplication().invokeLater({
                 if (doc != null && formatted != source) {
                     // No suppressReload here: formatting changes no element, so the debounced
                     // DocumentListener reload just re-parses the text the canvas already shows.
@@ -509,7 +517,7 @@ class SvgPreviewPanel(
                         doc.setText(formatted)
                     }
                 }
-            }
+            }, ModalityState.defaultModalityState())
         }
     }
 

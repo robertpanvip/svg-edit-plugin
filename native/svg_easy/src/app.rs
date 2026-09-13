@@ -480,19 +480,20 @@ impl SvgEasyApp {
             )
     }
 
-    /// The canvas's right-click menu: the four stack moves for the selected element.
+    /// The canvas's right-click menu: duplicate / delete, then the stack moves, then align.
     ///
-    /// These used to be a permanent "Layers" panel down the left. The panel spent a column of
-    /// width listing every element in the document, when the only question anyone asks of that
-    /// list is *"put this one in front of that one"* — and that question is always asked about
-    /// the element already under the pointer. So the list is gone and the four moves live where
-    /// the pointer is.
+    /// The stack moves used to be a permanent "Layers" panel down the left. The panel spent a
+    /// column of width listing every element in the document, when the only question anyone asks
+    /// of that list is *"put this one in front of that one"* — and that question is always asked
+    /// about the element already under the pointer. So the list is gone and the four moves live
+    /// where the pointer is.
     ///
     /// The menu is attached to the canvas whether or not anything is selected, because the
     /// right-click that opens it is also what makes the selection (`on_canvas_right_down`). Hence
     /// the check here rather than at attach time: the builder runs a frame after that click, so it
     /// sees the selection the click just made. Fewer than one element, or more than one, and there
-    /// is nothing a stack move could act on — an empty menu, which is never opened at all.
+    /// is nothing a duplicate/delete/stack move could act on — an empty menu, which is never opened
+    /// at all.
     pub fn restack_menu(
         &self,
         cx: &mut Context<Self>,
@@ -505,6 +506,34 @@ impl SvgEasyApp {
             if len == 0 {
                 return menu;
             }
+
+            // Duplicate and Delete act on the whole selection and are the entries reached for most
+            // often, so they lead the menu. "复制一份" is the duplicate action (the same as Ctrl+D):
+            // a clone laid on top of the selection, which — unlike a clipboard copy — shows its
+            // result at once instead of waiting for a second Paste step.
+            let menu = {
+                let view = view.clone();
+                menu.item(PopupMenuItem::new("复制一份").on_click(move |_, window, cx| {
+                    view.update(cx, |this, cx| {
+                        if this.editor.duplicate_selection() {
+                            this.after_document_edit(window, cx);
+                        }
+                    })
+                    .ok();
+                }))
+            };
+            let menu = {
+                let view = view.clone();
+                menu.item(PopupMenuItem::new("删除").on_click(move |_, window, cx| {
+                    view.update(cx, |this, cx| {
+                        if this.editor.delete_selection() {
+                            this.after_document_edit(window, cx);
+                        }
+                    })
+                    .ok();
+                }))
+            };
+            let menu = menu.item(PopupMenuItem::separator());
 
             // A single shape gets the layer-stacking moves.
             if len == 1 {
