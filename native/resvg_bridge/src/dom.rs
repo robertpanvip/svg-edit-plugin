@@ -108,8 +108,37 @@ pub enum Mode {
     /// Skip every subtree rooted at one of the given node ids (a group drag
     /// hides all its members from the background layer at once).
     HideMany(HashSet<usize>),
-    /// Keep only the given chain of arena indices (root + ancestors + node).
+    /// Keep only the given chain of arena indices (root + ancestors + node), plus the document's
+    /// definitions so the isolated subtree still paints correctly — see
+    /// [`Document::solo_keep`].
     Solo(HashSet<usize>),
+}
+
+/// Elements that never paint on their own: they exist only to be referenced (`<defs>`, a
+/// gradient, a `<clipPath>`, a `<use>` target) or to carry metadata. Keeping them in an isolated
+/// [`Mode::Solo`] slice therefore adds no artwork, but restores the paint they define.
+fn is_definition_element(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "defs" | "symbol"
+            | "marker"
+            | "pattern"
+            | "clippath"
+            | "mask"
+            | "filter"
+            | "lineargradient"
+            | "radialgradient"
+            | "style"
+            | "script"
+            | "title"
+            | "desc"
+            | "metadata"
+            | "view"
+            | "cursor"
+            | "font"
+            | "font-face"
+            | "color-profile"
+    )
 }
 
 pub struct Document {
@@ -398,15 +427,51 @@ impl Document {
     }
 
     pub fn serialize(&self, mode: &Mode) -> String {
-        let blocked = self.span_blocked(mode);
+        // `Solo` renders one isolated subtree, so it has to carry the document's *definitions* with
+        // it: the `<style>` rule that paints the shape, a gradient, a `<clipPath>`, the target of a
+        // `<use>`. None of those paint on their own, so keeping them adds no stray artwork — but
+        // without them the isolated shape renders with the wrong paint. That is exactly the drag
+        // ghost (`Mode::Solo` of a single shape), where a `<path class="b">` used to lose its `.b`
+        // rule and change fill/stroke the moment it was picked up.
+        let kept = match mode {
+            Mode::Solo(chain) => Some(self.solo_keep(chain)),
+            _ => None,
+        };
+        let blocked = self.span_blocked(mode, kept.as_deref());
         let mut out = String::with_capacity(self.source.len() + 64);
-        self.write_node(&mut out, 0, mode, &blocked);
+        self.write_node(&mut out, 0, mode, &blocked, kept.as_deref());
         out
+    }
+
+    /// The elements [`Mode::Solo`] actually keeps: the requested chain, plus every definition
+    /// element (with its subtree) anywhere in the document — see [`serialize`].
+    ///
+    /// Definitions are found by tag name, which is precisely the set of elements that render
+    /// nothing by themselves. Indices are in document order (a child always outranks its parent),
+    /// so one forward sweep marks a kept definition and everything nested under it.
+    fn solo_keep(&self, chain: &HashSet<usize>) -> Vec<bool> {
+        let mut keep = vec![false; self.nodes.len()];
+        for &idx in chain {
+            if idx < keep.len() {
+                keep[idx] = true;
+            }
+        }
+        let mut under_defs = vec![false; self.nodes.len()];
+        for idx in 1..self.nodes.len() {
+            let NodeKind::Element(el) = &self.nodes[idx] else {
+                continue;
+            };
+            if under_defs[el.parent] || is_definition_element(&el.name) {
+                keep[idx] = true;
+                under_defs[idx] = true;
+            }
+        }
+        keep
     }
 
     /// Single bottom-up pass marking elements whose subtree cannot be copied
     /// from the source span under the given mode.
-    fn span_blocked(&self, mode: &Mode) -> Vec<bool> {
+    fn span_blocked(&self, mode: &Mode, kept: Option<&[bool]>) -> Vec<bool> {
         let mut blocked = vec![false; self.nodes.len()];
         for idx in (1..self.nodes.len()).rev() {
             if let NodeKind::Element(el) = &self.nodes[idx] {
@@ -415,7 +480,8 @@ impl Document {
                     Mode::InjectIds => true,
                     Mode::Hide(h) => el.node_id == *h,
                     Mode::HideMany(set) => set.contains(&el.node_id),
-                    Mode::Solo(set) => !set.contains(&idx),
+                    // `kept` is always `Some` under Solo: `serialize` builds it above.
+                    Mode::Solo(_) => !kept.is_some_and(|k| k[idx]),
                 };
                 blocked[idx] = own || el.dirty || el.children.iter().any(|&c| blocked[c]);
             }
@@ -423,12 +489,19 @@ impl Document {
         blocked
     }
 
-    fn write_node(&self, out: &mut String, idx: usize, mode: &Mode, blocked: &[bool]) {
+    fn write_node(
+        &self,
+        out: &mut String,
+        idx: usize,
+        mode: &Mode,
+        blocked: &[bool],
+        kept: Option<&[bool]>,
+    ) {
         match &self.nodes[idx] {
             NodeKind::Element(el) => {
                 if idx == 0 {
                     for &c in &el.children {
-                        self.write_node(out, c, mode, blocked);
+                        self.write_node(out, c, mode, blocked, kept);
                     }
                     return;
                 }
@@ -442,8 +515,8 @@ impl Document {
                         return;
                     }
                 }
-                if let Mode::Solo(set) = mode {
-                    if !set.contains(&idx) {
+                if let Mode::Solo(_) = mode {
+                    if !kept.is_some_and(|k| k[idx]) {
                         return;
                     }
                 }
@@ -475,7 +548,7 @@ impl Document {
                 } else {
                     out.push('>');
                     for &c in &el.children {
-                        self.write_node(out, c, mode, blocked);
+                        self.write_node(out, c, mode, blocked, kept);
                     }
                     out.push_str("</");
                     out.push_str(&el.name);
@@ -885,6 +958,36 @@ mod tests {
         assert!(!out.contains("id='box-a'"));
         assert!(!out.contains("id='bg'"));
         assert!(!out.contains("<text"));
+    }
+
+    #[test]
+    fn solo_carries_definitions_so_a_styled_shape_keeps_its_paint() {
+        // The reported drag bug: a `<path class="b">` painted by a `<style>` rule that lives in a
+        // sibling `<defs>`. A chain-only slice dropped the rule, so the drag ghost rendered the
+        // path with the default fill and no stroke — the shape "changed style" the instant it was
+        // picked up.
+        let src = concat!(
+            "<svg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'>\n",
+            "  <defs><style>.b{fill:none;stroke:#333}</style></defs>\n",
+            "  <path id='icon' class='b' d='M1 2 L3 4'/>\n",
+            "  <rect id='other' x='5' y='5' width='2' height='2' fill='#000'/>\n",
+            "</svg>"
+        );
+        let doc = Document::parse(src);
+        let icon = doc
+            .nodes
+            .iter()
+            .position(|n| matches!(n, NodeKind::Element(e) if e.attr("id").as_deref() == Some("icon")))
+            .unwrap();
+        let chain: HashSet<usize> = doc.path_to(icon).into_iter().collect();
+
+        let out = doc.serialize(&Mode::Solo(chain));
+        assert!(out.contains("class='b'"), "the dragged shape is kept: {out}");
+        assert!(
+            out.contains(".b{fill:none;stroke:#333}"),
+            "its <style> rule rides along: {out}"
+        );
+        assert!(!out.contains("id='other'"), "neighbouring artwork stays out: {out}");
     }
 
     #[test]
